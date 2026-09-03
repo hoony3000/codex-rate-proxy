@@ -2,5 +2,6 @@ __pycache__/
 *.py[cod]
 *.log
 .env
+llm_rate_proxy.ini
 .venv/
 venv/

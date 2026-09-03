@@ -12,7 +12,7 @@ Codex sends several model requests in a short period of time.
 - Exponential backoff for HTTP 429 responses
 - Honors the upstream `Retry-After` header
 - Streams SSE responses without changing their payload
-- Uses standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` variables
+- Reads runtime options from an INI configuration file
 - Listens on `127.0.0.1` by default
 - No `pip install` or root access required
 
@@ -31,46 +31,49 @@ chmod 700 llm_rate_proxy.py
 
 ## Configure
 
-The only required variable is the actual upstream API base URL:
+Copy the example configuration and edit the copy:
 
 ```bash
-export LLM_TARGET_BASE_URL="https://llm.example.com/v1"
-export NO_PROXY="localhost,127.0.0.1"
+cp llm_rate_proxy.ini.example llm_rate_proxy.ini
 ```
 
-When a corporate forward proxy is required:
+```ini
+[server]
+host = 127.0.0.1
+port = 8765
 
-```bash
-export HTTP_PROXY="http://proxy.example.com:8080"
-export HTTPS_PROXY="http://proxy.example.com:8080"
-export NO_PROXY="localhost,127.0.0.1"
+[upstream]
+base_url = https://llm.example.com/v1
+timeout_seconds = 600
+
+[rate_limit]
+min_interval_seconds = 10
+max_retries = 5
+backoff_base_seconds = 5
+backoff_max_seconds = 60
+backoff_jitter_seconds = 1
+
+[forward_proxy]
+http = http://proxy.example.com:8080
+https = http://proxy.example.com:8080
+bypass = localhost,127.0.0.1
 ```
 
-Optional tuning:
-
-```bash
-export LLM_MIN_INTERVAL_SECONDS="10"
-export LLM_MAX_RETRIES="5"
-export LLM_BACKOFF_BASE_SECONDS="5"
-export LLM_BACKOFF_MAX_SECONDS="60"
-export LLM_BACKOFF_JITTER_SECONDS="1"
-export LLM_UPSTREAM_TIMEOUT_SECONDS="600"
-export LLM_PROXY_HOST="127.0.0.1"
-export LLM_PROXY_PORT="8765"
-```
-
-For `csh` or `tcsh`, use `setenv`:
-
-```csh
-setenv LLM_TARGET_BASE_URL "https://llm.example.com/v1"
-setenv NO_PROXY "localhost,127.0.0.1"
-setenv LLM_MIN_INTERVAL_SECONDS "10"
-```
+Leave `http` and `https` empty when the upstream API is directly reachable.
+The real `llm_rate_proxy.ini` is ignored by Git so that internal addresses or
+proxy credentials are not committed.
 
 ## Run
 
 ```bash
 python3 llm_rate_proxy.py
+```
+
+The default configuration path is `llm_rate_proxy.ini` beside the script. To
+use a different file:
+
+```bash
+python3 llm_rate_proxy.py --config /path/to/proxy.ini
 ```
 
 To keep it running after logout:

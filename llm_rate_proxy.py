@@ -8,6 +8,8 @@ remote CentOS host behind an HTTP/HTTPS corporate proxy.
 from __future__ import annotations
 
 import email.utils
+import argparse
+import configparser
 import http.server
 import os
 import random
@@ -21,15 +23,21 @@ from datetime import datetime, timezone
 from typing import BinaryIO, Optional
 
 
-LISTEN_HOST = os.environ.get("LLM_PROXY_HOST", "127.0.0.1")
-LISTEN_PORT = int(os.environ.get("LLM_PROXY_PORT", "8765"))
-TARGET_BASE_URL = os.environ.get("LLM_TARGET_BASE_URL", "").rstrip("/")
-MIN_INTERVAL = float(os.environ.get("LLM_MIN_INTERVAL_SECONDS", "10"))
-MAX_RETRIES = int(os.environ.get("LLM_MAX_RETRIES", "5"))
-BACKOFF_BASE = float(os.environ.get("LLM_BACKOFF_BASE_SECONDS", "5"))
-BACKOFF_MAX = float(os.environ.get("LLM_BACKOFF_MAX_SECONDS", "60"))
-JITTER = float(os.environ.get("LLM_BACKOFF_JITTER_SECONDS", "1"))
-UPSTREAM_TIMEOUT = float(os.environ.get("LLM_UPSTREAM_TIMEOUT_SECONDS", "600"))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "llm_rate_proxy.ini")
+
+# Populated by load_config() before the server starts.
+LISTEN_HOST = "127.0.0.1"
+LISTEN_PORT = 8765
+TARGET_BASE_URL = ""
+MIN_INTERVAL = 10.0
+MAX_RETRIES = 5
+BACKOFF_BASE = 5.0
+BACKOFF_MAX = 60.0
+JITTER = 1.0
+UPSTREAM_TIMEOUT = 600.0
+FORWARD_PROXIES = {}
+NO_PROXY = "localhost,127.0.0.1"
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -62,6 +70,73 @@ class RequestPacer:
 
 
 PACER = RequestPacer(MIN_INTERVAL)
+
+
+def load_config(path: str) -> None:
+    global LISTEN_HOST, LISTEN_PORT, TARGET_BASE_URL
+    global MIN_INTERVAL, MAX_RETRIES, BACKOFF_BASE, BACKOFF_MAX, JITTER
+    global UPSTREAM_TIMEOUT, FORWARD_PROXIES, NO_PROXY, PACER
+
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        with open(path, "r", encoding="utf-8") as config_file:
+            parser.read_file(config_file)
+    except FileNotFoundError:
+        raise ValueError("config file not found: %s" % path)
+    except (OSError, configparser.Error) as exc:
+        raise ValueError("could not read config file %s: %s" % (path, exc))
+
+    try:
+        LISTEN_HOST = parser.get("server", "host", fallback="127.0.0.1").strip()
+        LISTEN_PORT = parser.getint("server", "port", fallback=8765)
+        TARGET_BASE_URL = parser.get("upstream", "base_url").strip().rstrip("/")
+        UPSTREAM_TIMEOUT = parser.getfloat(
+            "upstream", "timeout_seconds", fallback=600.0
+        )
+        MIN_INTERVAL = parser.getfloat(
+            "rate_limit", "min_interval_seconds", fallback=10.0
+        )
+        MAX_RETRIES = parser.getint("rate_limit", "max_retries", fallback=5)
+        BACKOFF_BASE = parser.getfloat(
+            "rate_limit", "backoff_base_seconds", fallback=5.0
+        )
+        BACKOFF_MAX = parser.getfloat(
+            "rate_limit", "backoff_max_seconds", fallback=60.0
+        )
+        JITTER = parser.getfloat(
+            "rate_limit", "backoff_jitter_seconds", fallback=1.0
+        )
+        http_proxy = parser.get("forward_proxy", "http", fallback="").strip()
+        https_proxy = parser.get("forward_proxy", "https", fallback="").strip()
+        NO_PROXY = parser.get(
+            "forward_proxy", "bypass", fallback="localhost,127.0.0.1"
+        ).strip()
+    except (configparser.Error, ValueError) as exc:
+        raise ValueError("invalid config value in %s: %s" % (path, exc))
+
+    if not LISTEN_HOST:
+        raise ValueError("[server] host must not be empty")
+    if not 1 <= LISTEN_PORT <= 65535:
+        raise ValueError("[server] port must be between 1 and 65535")
+    if not TARGET_BASE_URL.startswith(("http://", "https://")):
+        raise ValueError("[upstream] base_url must start with http:// or https://")
+    if min(UPSTREAM_TIMEOUT, MIN_INTERVAL, BACKOFF_BASE, BACKOFF_MAX, JITTER) < 0:
+        raise ValueError("timeout, interval, backoff, and jitter values must be non-negative")
+    if MAX_RETRIES < 0:
+        raise ValueError("[rate_limit] max_retries must be non-negative")
+
+    FORWARD_PROXIES = {}
+    if http_proxy:
+        FORWARD_PROXIES["http"] = http_proxy
+    if https_proxy:
+        FORWARD_PROXIES["https"] = https_proxy
+
+    # urllib's bypass check reads no_proxy. Set it only inside this process from
+    # the INI file so users do not need to export an environment variable.
+    if NO_PROXY:
+        os.environ["no_proxy"] = NO_PROXY
+
+    PACER = RequestPacer(MIN_INTERVAL)
 
 
 def log(message: str) -> None:
@@ -223,18 +298,28 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    if not TARGET_BASE_URL.startswith(("http://", "https://")):
-        print(
-            "Set LLM_TARGET_BASE_URL, for example:\n"
-            "  export LLM_TARGET_BASE_URL=https://llm.example.com/v1",
-            file=sys.stderr,
-        )
+    argument_parser = argparse.ArgumentParser(description=__doc__)
+    argument_parser.add_argument(
+        "-c",
+        "--config",
+        default=DEFAULT_CONFIG_PATH,
+        help="INI config path (default: %(default)s)",
+    )
+    args = argument_parser.parse_args()
+
+    try:
+        load_config(os.path.abspath(os.path.expanduser(args.config)))
+    except ValueError as exc:
+        print("configuration error: %s" % exc, file=sys.stderr)
         raise SystemExit(2)
 
-    urllib.request.install_opener(urllib.request.build_opener(urllib.request.ProxyHandler()))
+    urllib.request.install_opener(
+        urllib.request.build_opener(urllib.request.ProxyHandler(FORWARD_PROXIES))
+    )
     server = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), ProxyHandler)
     log("listening on http://%s:%d" % (LISTEN_HOST, LISTEN_PORT))
     log("target: %s" % TARGET_BASE_URL)
+    log("forward proxy: %s" % ("configured" if FORWARD_PROXIES else "direct"))
     log("minimum interval: %.1fs; 429 retries: %d" % (MIN_INTERVAL, MAX_RETRIES))
     try:
         server.serve_forever()
