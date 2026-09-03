@@ -3,8 +3,9 @@ host = 127.0.0.1
 port = 8765
 
 [upstream]
-base_url = https://llm.example.com/v1
+base_url = http://llm.example.com/v1
 timeout_seconds = 600
+max_request_body_bytes = 134217728
 
 [rate_limit]
 min_interval_seconds = 10
@@ -16,5 +17,3 @@ backoff_jitter_seconds = 1
 [forward_proxy]
 # Leave these empty when the upstream API is directly reachable.
 http = http://proxy.example.com:8080
-https = http://proxy.example.com:8080
-bypass = localhost,127.0.0.1

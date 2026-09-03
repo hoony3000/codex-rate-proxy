@@ -1,0 +1,22 @@
+[package]
+name = "codex-rate-proxy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Rate-limiting HTTP proxy for Codex CLI and OpenAI-compatible Responses APIs"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+bytes = "1"
+futures-util = "0.3"
+httpdate = "1"
+reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

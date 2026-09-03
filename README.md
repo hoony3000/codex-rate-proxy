@@ -1,7 +1,9 @@
 # Codex Rate Proxy
 
 A small local rate-limiting proxy for Codex CLI and OpenAI-compatible
-Responses APIs. It uses only the Python standard library.
+Responses APIs. The primary implementation is a static Rust binary for older
+Linux systems such as CentOS 7.4. A Python standard-library implementation is
+also included as a fallback.
 
 It is useful when an upstream API returns HTTP `429 Too Many Requests` because
 Codex sends several model requests in a short period of time.
@@ -14,14 +16,56 @@ Codex sends several model requests in a short period of time.
 - Streams SSE responses without changing their payload
 - Reads runtime options from an INI configuration file
 - Listens on `127.0.0.1` by default
-- No `pip install` or root access required
+- Static `x86_64-unknown-linux-musl` release binary
+- No Python, OpenSSL, libcurl, or root access required at runtime
 
-## Requirements
+## Download a prebuilt binary
 
-- Python 3.8 or later
-- An OpenAI-compatible API that supports `/v1/responses`
+Download `codex-rate-proxy-x86_64-linux-musl.tar.gz` from the latest GitHub
+Actions run or from a tagged GitHub Release. The musl binary is statically
+linked and is intended to run on x86_64 CentOS 7.4 without a Rust or Python
+installation.
 
-## Install
+```bash
+tar -xzf codex-rate-proxy-x86_64-linux-musl.tar.gz
+chmod 700 codex-rate-proxy
+cp llm_rate_proxy.ini.example llm_rate_proxy.ini
+```
+
+## Build from source
+
+GNU build on the current Linux host:
+
+```bash
+cargo test
+cargo build --release
+```
+
+Static musl build:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo test
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+The output is:
+
+```text
+target/x86_64-unknown-linux-musl/release/codex-rate-proxy
+```
+
+To publish a release, push a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The GitHub workflow builds, verifies, packages, checksums, and attaches the
+static binary to the release.
+
+## Python fallback
 
 Copy `llm_rate_proxy.py` to the machine where Codex CLI runs:
 
@@ -43,8 +87,9 @@ host = 127.0.0.1
 port = 8765
 
 [upstream]
-base_url = https://llm.example.com/v1
+base_url = http://llm.example.com/v1
 timeout_seconds = 600
+max_request_body_bytes = 134217728
 
 [rate_limit]
 min_interval_seconds = 10
@@ -55,22 +100,26 @@ backoff_jitter_seconds = 1
 
 [forward_proxy]
 http = http://proxy.example.com:8080
-https = http://proxy.example.com:8080
-bypass = localhost,127.0.0.1
 ```
 
-Leave `http` and `https` empty when the upstream API is directly reachable.
+Leave `http` empty when the upstream API is directly reachable.
 The real `llm_rate_proxy.ini` is ignored by Git so that internal addresses or
 proxy credentials are not committed.
 
 ## Run
 
 ```bash
-python3 llm_rate_proxy.py
+./codex-rate-proxy
 ```
 
-The default configuration path is `llm_rate_proxy.ini` beside the script. To
+The default configuration path is `llm_rate_proxy.ini` beside the executable. To
 use a different file:
+
+```bash
+./codex-rate-proxy --config /path/to/proxy.ini
+```
+
+To run the Python fallback instead:
 
 ```bash
 python3 llm_rate_proxy.py --config /path/to/proxy.ini
@@ -79,7 +128,7 @@ python3 llm_rate_proxy.py --config /path/to/proxy.ini
 To keep it running after logout:
 
 ```bash
-nohup python3 llm_rate_proxy.py > "$PWD/llm-rate-proxy.log" 2>&1 &
+nohup ./codex-rate-proxy > "$PWD/llm-rate-proxy.log" 2>&1 &
 ```
 
 Health check:
@@ -124,8 +173,8 @@ when requests are sent and relays the final response.
 - Keep the default `127.0.0.1` listener unless remote access is intentional.
 - Do not put API keys or internal hostnames in this repository.
 - Prompts and response bodies are not written to the proxy log.
-- TLS verification is performed by Python using the host's configured CA
-  certificates.
+- The Rust implementation intentionally supports only an HTTP upstream and an
+  optional HTTP forward proxy. It contains no TLS stack.
 
 ## License
 

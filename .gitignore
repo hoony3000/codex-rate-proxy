@@ -5,3 +5,4 @@ __pycache__/
 llm_rate_proxy.ini
 .venv/
 venv/
+/target/
