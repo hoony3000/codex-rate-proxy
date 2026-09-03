@@ -65,12 +65,16 @@ jobs:
         with:
           name: codex-rate-proxy-x86_64-linux-musl
 
-      - name: Publish GitHub Release
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --title "${GITHUB_REF_NAME}"
+          fi
+          gh release upload "${GITHUB_REF_NAME}" \
             codex-rate-proxy-x86_64-linux-musl.tar.gz \
             codex-rate-proxy-x86_64-linux-musl.tar.gz.sha256 \
-            --generate-notes \
-            --title "${GITHUB_REF_NAME}"
+            --clobber
