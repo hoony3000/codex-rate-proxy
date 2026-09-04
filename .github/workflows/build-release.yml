@@ -38,10 +38,12 @@ jobs:
         run: |
           mkdir -p package
           cp target/x86_64-unknown-linux-musl/release/codex-rate-proxy package/
-          cp llm_rate_proxy.ini.example package/
+          cp llm_rate_proxy.ini.example package/config.ini
           cp install.sh package/
           cp README.md package/
           chmod 755 package/install.sh
+          test -f package/config.ini
+          test -x package/install.sh
           file package/codex-rate-proxy
           if readelf -l package/codex-rate-proxy | grep -q 'Requesting program interpreter'; then
             echo 'Binary is dynamically linked; expected a static musl binary.' >&2
