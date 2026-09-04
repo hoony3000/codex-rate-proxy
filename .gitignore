@@ -3,6 +3,7 @@ __pycache__/
 *.log
 .env
 llm_rate_proxy.ini
+config.ini
 .venv/
 venv/
 /target/

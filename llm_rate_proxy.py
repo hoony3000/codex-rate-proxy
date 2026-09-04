@@ -23,8 +23,7 @@ from datetime import datetime, timezone
 from typing import BinaryIO, Optional
 
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CONFIG_PATH = os.path.join(SCRIPT_DIR, "llm_rate_proxy.ini")
+DEFAULT_CONFIG_PATH = os.path.expanduser("~/.config/codex-rate-proxy/config.ini")
 
 # Populated by load_config() before the server starts.
 LISTEN_HOST = "127.0.0.1"

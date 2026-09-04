@@ -28,9 +28,17 @@ installation.
 
 ```bash
 tar -xzf codex-rate-proxy-x86_64-linux-musl.tar.gz
-chmod 700 codex-rate-proxy
-cp llm_rate_proxy.ini.example llm_rate_proxy.ini
+./install.sh
 ```
+
+This installs the executable and initial configuration to:
+
+```text
+~/.local/bin/codex-rate-proxy
+~/.config/codex-rate-proxy/config.ini
+```
+
+`install.sh` preserves an existing `config.ini`. No root access is required.
 
 ## Build from source
 
@@ -78,7 +86,10 @@ chmod 700 llm_rate_proxy.py
 Copy the example configuration and edit the copy:
 
 ```bash
-cp llm_rate_proxy.ini.example llm_rate_proxy.ini
+mkdir -p ~/.config/codex-rate-proxy
+cp llm_rate_proxy.ini.example ~/.config/codex-rate-proxy/config.ini
+chmod 600 ~/.config/codex-rate-proxy/config.ini
+vi ~/.config/codex-rate-proxy/config.ini
 ```
 
 ```ini
@@ -103,20 +114,20 @@ http = http://proxy.example.com:8080
 ```
 
 Leave `http` empty when the upstream API is directly reachable.
-The real `llm_rate_proxy.ini` is ignored by Git so that internal addresses or
-proxy credentials are not committed.
+Do not commit the real `config.ini`, because it can contain internal addresses
+or proxy credentials.
 
 ## Run
 
 ```bash
-./codex-rate-proxy
+~/.local/bin/codex-rate-proxy
 ```
 
-The default configuration path is `llm_rate_proxy.ini` beside the executable. To
-use a different file:
+The default configuration path is
+`~/.config/codex-rate-proxy/config.ini`. To use a different file:
 
 ```bash
-./codex-rate-proxy --config /path/to/proxy.ini
+~/.local/bin/codex-rate-proxy --config /path/to/proxy.ini
 ```
 
 To run the Python fallback instead:
@@ -128,7 +139,7 @@ python3 llm_rate_proxy.py --config /path/to/proxy.ini
 To keep it running after logout:
 
 ```bash
-nohup ./codex-rate-proxy > "$PWD/llm-rate-proxy.log" 2>&1 &
+nohup ~/.local/bin/codex-rate-proxy > "$HOME/.config/codex-rate-proxy/proxy.log" 2>&1 &
 ```
 
 Health check:
