@@ -19,7 +19,8 @@ use axum::{
 use futures_util::StreamExt;
 use tokio::{net::TcpListener, sync::Mutex, time::sleep};
 
-const DEFAULT_CONFIG_NAME: &str = "llm_rate_proxy.ini";
+const DEFAULT_CONFIG_DIR: &str = ".config/codex-rate-proxy";
+const DEFAULT_CONFIG_NAME: &str = "config.ini";
 
 #[derive(Clone, Debug)]
 struct Settings {
@@ -305,7 +306,7 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
             "-h" | "--help" => {
                 println!(
                     "codex-rate-proxy\n\nUsage: codex-rate-proxy [--config PATH]\n\n\
-                     Default config: {DEFAULT_CONFIG_NAME} beside the executable"
+                     Default config: ~/.config/codex-rate-proxy/{DEFAULT_CONFIG_NAME}"
                 );
                 std::process::exit(0);
             }
@@ -316,11 +317,10 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
 }
 
 fn default_config_path() -> Result<PathBuf, Box<dyn Error>> {
-    let executable = env::current_exe()?;
-    let directory = executable
-        .parent()
-        .ok_or("could not determine executable directory")?;
-    Ok(directory.join(DEFAULT_CONFIG_NAME))
+    let home = env::var_os("HOME").ok_or("HOME is not set; use --config PATH")?;
+    Ok(PathBuf::from(home)
+        .join(DEFAULT_CONFIG_DIR)
+        .join(DEFAULT_CONFIG_NAME))
 }
 
 fn load_settings(path: &Path) -> Result<Settings, Box<dyn Error>> {
