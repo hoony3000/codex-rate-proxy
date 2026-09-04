@@ -39,6 +39,8 @@ This installs the executable and initial configuration to:
 ```
 
 `install.sh` preserves an existing `config.ini`. No root access is required.
+The release archive also contains the safe example configuration as
+`config.ini`.
 
 ## Build from source
 
@@ -140,7 +142,20 @@ To keep it running after logout:
 
 ```bash
 nohup ~/.local/bin/codex-rate-proxy > "$HOME/.config/codex-rate-proxy/proxy.log" 2>&1 &
+echo $! > "$HOME/.config/codex-rate-proxy/proxy.pid"
 ```
+
+After editing `config.ini`, reload it without interrupting the process:
+
+```bash
+kill -HUP "$(cat "$HOME/.config/codex-rate-proxy/proxy.pid")"
+```
+
+The upstream address, timeout, request-size limit, rate-limit policy, and
+forward proxy are applied to new requests. Existing requests and SSE streams
+continue with their original settings. Changes to `[server] host` or `port`
+require a restart. If the updated file is invalid, the proxy logs the error and
+keeps the last valid configuration.
 
 Health check:
 
