@@ -17,7 +17,11 @@ use axum::{
     Router,
 };
 use futures_util::StreamExt;
-use tokio::{net::TcpListener, sync::Mutex, time::sleep};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, RwLock},
+    time::sleep,
+};
 
 const DEFAULT_CONFIG_DIR: &str = ".config/codex-rate-proxy";
 const DEFAULT_CONFIG_NAME: &str = "config.ini";
@@ -38,9 +42,14 @@ struct Settings {
 }
 
 #[derive(Clone)]
-struct AppState {
+struct RuntimeConfig {
     settings: Arc<Settings>,
     client: reqwest::Client,
+}
+
+#[derive(Clone)]
+struct AppState {
+    runtime: Arc<RwLock<RuntimeConfig>>,
     last_upstream_start: Arc<Mutex<Option<Instant>>>,
 }
 
@@ -52,8 +61,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let settings = Arc::new(load_settings(&config_path)?);
     let client = build_client(&settings)?;
     let state = AppState {
-        settings: Arc::clone(&settings),
-        client,
+        runtime: Arc::new(RwLock::new(RuntimeConfig {
+            settings: Arc::clone(&settings),
+            client,
+        })),
         last_upstream_start: Arc::new(Mutex::new(None)),
     };
 
@@ -75,6 +86,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         "forward proxy: direct"
     });
 
+    spawn_reload_handler(state.clone(), config_path);
+
     let app = Router::new().fallback(proxy_request).with_state(state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -88,13 +101,82 @@ async fn shutdown_signal() {
     }
 }
 
+#[cfg(unix)]
+fn spawn_reload_handler(state: AppState, config_path: PathBuf) {
+    tokio::spawn(async move {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sighup = match signal(SignalKind::hangup()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                log(&format!("could not install SIGHUP handler: {error}"));
+                return;
+            }
+        };
+
+        while sighup.recv().await.is_some() {
+            reload_runtime_config(&state, &config_path).await;
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn spawn_reload_handler(_state: AppState, _config_path: PathBuf) {}
+
+async fn reload_runtime_config(state: &AppState, config_path: &Path) {
+    let mut new_settings = match load_settings(config_path).map_err(|error| error.to_string()) {
+        Ok(settings) => settings,
+        Err(error) => {
+            log(&format!(
+                "configuration reload failed; keeping current settings: {error}"
+            ));
+            return;
+        }
+    };
+
+    let current = state.runtime.read().await;
+    if new_settings.listen_host != current.settings.listen_host
+        || new_settings.listen_port != current.settings.listen_port
+    {
+        log("configuration reload: [server] host/port changes require a restart; keeping current listener");
+        new_settings.listen_host = current.settings.listen_host.clone();
+        new_settings.listen_port = current.settings.listen_port;
+    }
+    drop(current);
+
+    let new_client = match build_client(&new_settings).map_err(|error| error.to_string()) {
+        Ok(client) => client,
+        Err(error) => {
+            log(&format!(
+                "configuration reload failed; keeping current settings: {error}"
+            ));
+            return;
+        }
+    };
+
+    let target = new_settings.upstream_base_url.clone();
+    let interval = new_settings.min_interval.as_secs_f64();
+    let retries = new_settings.max_retries;
+    *state.runtime.write().await = RuntimeConfig {
+        settings: Arc::new(new_settings),
+        client: new_client,
+    };
+    log(&format!(
+        "configuration reloaded: target={target}; minimum interval={interval:.1}s; 429 retries={retries}"
+    ));
+}
+
 async fn proxy_request(State(state): State<AppState>, request: Request) -> Response<Body> {
     if request.method() == Method::GET && request.uri().path() == "/health" {
         return response_with_body(StatusCode::OK, "application/json", "{\"status\":\"ok\"}\n");
     }
 
+    let runtime = state.runtime.read().await.clone();
+    let settings = runtime.settings;
+    let client = runtime.client;
+
     let (parts, incoming_body) = request.into_parts();
-    let body = match to_bytes(incoming_body, state.settings.max_request_body_bytes).await {
+    let body = match to_bytes(incoming_body, settings.max_request_body_bytes).await {
         Ok(body) => body,
         Err(error) => {
             log(&format!("could not read request body: {error}"));
@@ -106,21 +188,20 @@ async fn proxy_request(State(state): State<AppState>, request: Request) -> Respo
         }
     };
 
-    let target_url = build_target_url(&state.settings.upstream_base_url, &parts.uri);
+    let target_url = build_target_url(&settings.upstream_base_url, &parts.uri);
     let headers = filtered_request_headers(&parts.headers);
 
-    for attempt in 0..=state.settings.max_retries {
-        wait_for_upstream_turn(&state).await;
+    for attempt in 0..=settings.max_retries {
+        wait_for_upstream_turn(&state, settings.min_interval).await;
         log(&format!(
             "{} {} -> upstream (attempt {}/{})",
             parts.method,
             parts.uri,
             attempt + 1,
-            state.settings.max_retries + 1
+            settings.max_retries + 1
         ));
 
-        let result = state
-            .client
+        let result = client
             .request(parts.method.clone(), &target_url)
             .headers(headers.clone())
             .body(body.clone())
@@ -140,14 +221,14 @@ async fn proxy_request(State(state): State<AppState>, request: Request) -> Respo
         };
 
         if upstream.status() == StatusCode::TOO_MANY_REQUESTS
-            && attempt < state.settings.max_retries
+            && attempt < settings.max_retries
         {
             let retry_after = upstream
                 .headers()
                 .get(header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_retry_after);
-            let delay = retry_delay(&state.settings, attempt, retry_after);
+            let delay = retry_delay(&settings, attempt, retry_after);
             drop(upstream);
             log(&format!(
                 "upstream returned 429; retrying in {:.1} seconds",
@@ -180,12 +261,12 @@ fn stream_upstream_response(upstream: reqwest::Response) -> Response<Body> {
     response
 }
 
-async fn wait_for_upstream_turn(state: &AppState) {
+async fn wait_for_upstream_turn(state: &AppState, min_interval: Duration) {
     let mut last_start = state.last_upstream_start.lock().await;
     if let Some(previous) = *last_start {
         let elapsed = previous.elapsed();
-        if elapsed < state.settings.min_interval {
-            let delay = state.settings.min_interval - elapsed;
+        if elapsed < min_interval {
+            let delay = min_interval - elapsed;
             log(&format!(
                 "rate limit: waiting {:.1} seconds",
                 delay.as_secs_f64()
