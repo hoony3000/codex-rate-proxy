@@ -138,6 +138,8 @@ idle_timeout_seconds = {idle}
     def tearDown(self):
         STREAM_RELEASE.set()
         (self.home / "release").touch()
+        for report in self.home.glob("*-report"):
+            report.with_name(report.name.replace("-report", "-release")).touch()
         for proc in self.processes:
             if proc.poll() is None:
                 proc.terminate()
@@ -330,6 +332,27 @@ idle_timeout_seconds = {idle}
         path = self.records()[0]
         rec = json.loads(path.read_text())
         self.assertEqual(Path(os.readlink(f'/proc/{rec["pid"]}/cwd')), path.parent)
+
+    def test_failed_creator_keeps_proxy_used_by_another_session(self):
+        self.mock.write_text(self.mock.read_text() + "sys.exit(2)\n")
+        children = []
+        for name in ("first", "second"):
+            report, release = self.home / (name + "-report"), self.home / (name + "-release")
+            proc = subprocess.Popen([BIN, "launch", "--config", str(self.config)],
+                env=dict(self.env, MOCK_REPORT=str(report), MOCK_RELEASE=str(release)),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.processes.append(proc)
+            children.append((proc, release))
+            wait_until(report.exists)
+        self.assertEqual(len(self.records()), 1)
+        self.assertIn("sessions=2", self.cli("list").stdout)
+        children[0][1].touch()
+        self.assertEqual(children[0][0].wait(timeout=10), 2)
+        self.assertIn("sessions=1", self.cli("list").stdout)
+        self.assertEqual(len(self.records()), 1)
+        children[1][1].touch()
+        self.assertEqual(children[1][0].wait(timeout=10), 2)
+        self.assertEqual(len(self.records()), 1)
 
     def test_registered_launch_forwards_subcommand_and_literal_arguments(self):
         self.cli("register", "alice", "--key-stdin", input=KEY_A)
