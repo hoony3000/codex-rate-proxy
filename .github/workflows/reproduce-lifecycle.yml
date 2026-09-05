@@ -1,0 +1,24 @@
+name: Real Codex lifecycle regression
+on:
+  pull_request:
+    paths:
+      - tests/reproduce_lifecycle.py
+      - .github/workflows/reproduce-lifecycle.yml
+      - src/**
+      - Cargo.toml
+      - Cargo.lock
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  reproduce:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build launcher
+        run: cargo build --locked --release
+      - name: Install real Codex for configuration-error reproduction
+        run: npm install --prefix /tmp/repro-codex @openai/codex@0.153.2
+      - name: Verify configuration-error cleanup with real Codex
+        run: python3 tests/reproduce_lifecycle.py target/release/codex-rate-proxy /tmp/repro-codex/node_modules/.bin/codex
