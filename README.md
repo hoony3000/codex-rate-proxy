@@ -20,6 +20,7 @@ Codex sends several model requests in a short period of time.
 - No Python, OpenSSL, libcurl, or root access required at runtime
 - One-command Codex launch with per-key proxy reuse and automatic port allocation
 - Idle cleanup with active Codex sessions and streaming requests protected
+- Named user registration for remembering each person's API key
 
 ## Launch Codex (Linux, Bash and csh/tcsh)
 
@@ -29,6 +30,11 @@ existing custom provider (default `corp`) and model in `~/.codex/config.toml`.
 No per-user port or key-file path belongs in the shared INI.
 
 ```sh
+# Register once (hidden prompt), then launch without entering the key again.
+codex-rate-proxy register hoony
+codex-rate-proxy launch --user hoony
+codex-rate-proxy launch --user hoony -- resume --last
+
 # Uses this shell's OPENAI_API_KEY; asks with echo disabled if it is missing.
 codex-rate-proxy launch
 
@@ -50,6 +56,35 @@ file commands are needed for managed mode. `launch` prints the local URL to
 stderr; `url` prints only the URL to stdout. With `--key-stdin`, input must end
 at EOF; Codex reconnects stdin to `/dev/tty` when a terminal is available.
 
+### Registered users
+
+`register NAME` saves a key only when explicitly requested. It prompts with
+echo disabled by default, even if `OPENAI_API_KEY` exists. For noninteractive
+registration, choose `--key-file PATH`, `--key-env NAME` or `--key-stdin`:
+
+```sh
+codex-rate-proxy register hoony --key-file /path/to/my-key
+codex-rate-proxy register hoony --replace --key-env MY_LLM_KEY
+codex-rate-proxy url --user hoony
+codex-rate-proxy stop --user hoony
+```
+
+Names contain 1-64 ASCII letters, digits, underscores or hyphens. Existing
+registrations require `--replace` to update. Keys are stored as plaintext in
+`~/.config/codex-rate-proxy/users/NAME.key` with permissions `600`; the users
+directory has permissions `700`. Shared INI files contain no personal paths.
+`--user` selects a saved key and cannot be combined with another key source.
+There is no account-wide default user: each person selects their own name.
+Without `--user`, the existing environment/prompt behavior remains available.
+Profiles are a convenience, not isolation between people sharing one Linux UID.
+Two names with the same key and configuration reuse the same proxy.
+Replacing a saved key affects future launches; existing sessions keep their key.
+
+Arguments after the launcher's `--` are passed unchanged to Codex, including
+subcommands and another `--` for literal arguments. Launcher configuration
+overrides precede these arguments, so Codex sees them as options, not prompt text.
+Any explicit Codex configuration overrides you supply are processed by Codex.
+
 The launcher passes the local `base_url`, provider selection, a dedicated
 `CODEX_RATE_PROXY_API_KEY` environment variable and retry/transport overrides
 to the Codex child. It never rewrites the shared Codex configuration or the
@@ -64,7 +99,9 @@ connection come exclusively from INI (ambient HTTP_PROXY is ignored).
 | Different key, upstream or canonical INI path | Create an independent proxy |
 | Stale record and no daemon lifetime lock | Recreate with an OS-assigned port |
 | Unresponsive process still holds its lock | Report an error; never blindly kill or duplicate it |
-| Codex exits, proxy remains within idle timeout | Reuse on next launch |
+| Codex exits successfully | Retain until idle timeout for reuse |
+| Codex exits with an error or cannot start | Stop the newly created proxy if no sessions or requests use it |
+| Failed launch reused an existing proxy | Keep the existing proxy |
 
 The managed HTTP listener requires the matching Bearer key, including on
 `/health`. Requests and 429 cooldown are shared by all sessions on that proxy.
@@ -103,6 +140,20 @@ Small lock files and the last log remain intentionally to avoid lock-file
 replacement races; logs are replaced when the same instance is recreated.
 Runtime state should be on a filesystem with working Linux `flock` support.
 The HOME path must fit a Unix socket pathname (108 bytes including the suffix).
+
+Managed daemons use their state directory as their working directory, while
+Codex keeps the directory from which you launched it. Changing project folders
+alone does not create extra proxies when the same shared INI is used. Copies of
+an INI at different canonical paths intentionally represent different instances;
+use the default common INI to share rate state across projects. Empty state
+directories/lock files are not running or zombie processes; use `list` to inspect
+managed instances and `prune` to stop unused ones.
+
+Before this fix, v0.3.0 was tested with real Codex 0.153.2: invalid `config.toml`
+left a live idle daemon (process state `S`, not zombie `Z`); changing folders with
+one common INI reused it, and separate INI paths created separate daemons.
+The reproduction is preserved in commit `797c6ac`; the current test verifies
+cleanup after malformed TOML and invalid provider configuration.
 
 Shared-account processes and files are not a security boundary between people
 using the same Linux UID. API-key authentication prevents accidental cross-key

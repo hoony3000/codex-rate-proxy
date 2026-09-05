@@ -1,5 +1,5 @@
 //! Linux launcher: per-key daemons, authenticated local control and kernel-backed leases.
-//! No API keys are persisted or placed in command-line arguments.
+//! Keys are persisted only by explicit registration, never in command-line arguments.
 use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -310,11 +310,11 @@ pub fn bootstrap(config: &Path) -> Result<Arc<Managed>> {
     }))
 }
 
-fn ensure_proxy(config: &Path, key: &str, dir: &Path, id: &str) -> Result<Record> {
+fn ensure_proxy(config: &Path, key: &str, dir: &Path, id: &str) -> Result<(Record, Option<std::sync::mpsc::Receiver<()>>)> {
     if let Ok(r) = record(dir) {
         if r.identity == id {
             if let Ok(s) = control(dir, &r, "status") {
-                if !s.stopping { return Ok(r); }
+                if !s.stopping { return Ok((r, None)); }
             }
         }
     }
@@ -330,6 +330,7 @@ fn ensure_proxy(config: &Path, key: &str, dir: &Path, id: &str) -> Result<Record
     let boot = Bootstrap { key: key.into(), identity: id.into(), token: random_id()? };
     let mut command = Command::new(env::current_exe()?);
     command.arg("__managed").arg("--config").arg(config)
+        .current_dir(dir)
         .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::from(log_file));
     // This closure performs only the async-signal-safe setsid syscall after fork.
     unsafe { command.pre_exec(|| {
@@ -346,8 +347,9 @@ fn ensure_proxy(config: &Path, key: &str, dir: &Path, id: &str) -> Result<Record
             if r.identity == id && r.token == boot.token {
                 if let Ok(s) = control(dir, &r, "status") {
                     if !s.stopping {
-                        thread::spawn(move || { let _ = child.wait(); });
-                        return Ok(r);
+                        let (done, reaped) = std::sync::mpsc::channel();
+                        thread::spawn(move || { let _ = child.wait(); let _ = done.send(()); });
+                        return Ok((r, Some(reaped)));
                     }
                 }
             }
@@ -365,6 +367,76 @@ fn validate_key(key: &str) -> Result<()> {
         return Err("API key must be a nonempty single line of printable ASCII without spaces".into());
     }
     Ok(())
+}
+
+fn profile_path(name: &str) -> Result<PathBuf> {
+    if name.is_empty() || name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err("user name must be 1-64 ASCII letters, digits, underscores or hyphens".into());
+    }
+    let home = env::var_os("HOME").ok_or("HOME is not set")?;
+    let dir = PathBuf::from(home).join(".config/codex-rate-proxy/users");
+    private_dir(&dir)?;
+    Ok(dir.join(format!("{name}.key")))
+}
+
+fn registered_key(name: &str) -> Result<String> {
+    let path = profile_path(name)?;
+    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path).map_err(|_| "cannot read registered user; run register NAME first")?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err("registered key must be a regular file with permissions 600".into());
+    }
+    let mut key = String::new();
+    file.take(16386).read_to_string(&mut key)?;
+    let key = key.trim_end_matches(['\r', '\n']).to_owned();
+    validate_key(&key)?;
+    Ok(key)
+}
+
+fn register(name: &str, source: Option<(&str, &str)>, replace: bool) -> Result<()> {
+    let path = profile_path(name)?;
+    let dir = path.parent().ok_or("invalid profile directory")?;
+    let guard = private_file(&dir.join("register.lock"), false)?;
+    lock(&guard, false)?;
+    if fs::symlink_metadata(&path).is_ok() && !replace {
+        return Err("user already registered; use --replace to update its key".into());
+    }
+    // Registration is explicit: do not silently save an inherited account-wide key.
+    let key = read_key(source.or(Some(("ask", ""))))?;
+    let temporary = dir.join(format!(".{}.tmp", random_id()?));
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        writeln!(file, "{key}")?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        File::open(dir)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    result?;
+    println!("registered {name}; launch with --user {name}");
+    Ok(())
+}
+
+fn cleanup_failed_launch(dir: &Path, r: &Record, created: Option<std::sync::mpsc::Receiver<()>>) {
+    let Some(reaped) = created else { return; };
+    let result = (|| -> Result<()> {
+        let guard = private_file(&dir.join("start.lock"), false)?;
+        lock(&guard, false)?;
+        // Authenticate the original instance and stop only if no other sessions/requests use it.
+        if control(dir, r, "stop")?.stopped {
+            if reaped.recv_timeout(Duration::from_secs(5)).is_err() {
+                return Err("proxy is still draining".into());
+            }
+            eprintln!("Stopped unused proxy created by failed launch");
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        eprintln!("Could not finish proxy cleanup; inspect codex-rate-proxy list/prune");
+    }
 }
 
 fn read_key(source: Option<(&str, &str)>) -> Result<String> {
@@ -387,12 +459,17 @@ fn read_key(source: Option<(&str, &str)>) -> Result<String> {
 pub fn dispatch() -> Result<Option<i32>> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let operation = arguments.first().map(String::as_str).unwrap_or("");
-    if !matches!(operation, "launch" | "url" | "list" | "stop" | "prune") { return Ok(None); }
+    if !matches!(operation, "launch" | "url" | "list" | "stop" | "prune" | "register") { return Ok(None); }
     let mut config = default_config_path()?;
     let mut source: Option<(&str, &str)> = None;
     let mut dry_run = false;
+    let mut replace = false;
+    let mut user: Option<&str> = None;
     let mut codex_args: &[String] = &[];
-    let mut i = 1;
+    let mut i = if operation == "register" { 2 } else { 1 };
+    let registration = if operation == "register" {
+        Some(arguments.get(1).ok_or("register requires a user name")?.as_str())
+    } else { None };
     while i < arguments.len() {
         let arg = arguments[i].as_str();
         if arg == "--" { codex_args = &arguments[i + 1..]; break; }
@@ -410,12 +487,26 @@ pub fn dispatch() -> Result<Option<i32>> {
                 source = Some((if arg == "--ask-key" { "ask" } else { "stdin" }, ""));
             }
             "--dry-run" => dry_run = true,
+            "--replace" => replace = true,
+            "--user" => {
+                if user.is_some() { return Err("choose only one user".into()); }
+                i += 1;
+                user = Some(arguments.get(i).ok_or("--user requires a name")?);
+            }
             _ => return Err(format!("unknown launcher option: {arg}").into()),
         }
         i += 1;
     }
     if dry_run && operation != "prune" { return Err("--dry-run is only valid for prune".into()); }
+    if replace && operation != "register" { return Err("--replace is only valid for register".into()); }
+    if user.is_some() && (source.is_some() || matches!(operation, "register" | "list" | "prune")) {
+        return Err("--user is a key source for launch/url/stop; do not combine it with other key sources".into());
+    }
     if !codex_args.is_empty() && operation != "launch" { return Err("Codex arguments are only valid for launch".into()); }
+    if let Some(name) = registration {
+        register(name, source, replace)?;
+        return Ok(Some(0));
+    }
     if matches!(operation, "list" | "prune") {
         if source.is_some() { return Err("list/prune do not accept a key".into()); }
         list_or_prune(operation, dry_run)?;
@@ -423,7 +514,7 @@ pub fn dispatch() -> Result<Option<i32>> {
     }
     let config = fs::canonicalize(config)?;
     let settings = load_settings(&config)?;
-    let key = read_key(source)?;
+    let key = match user { Some(name) => registered_key(name)?, None => read_key(source)? };
     let id = identity(&key, &settings.upstream_base_url, &config);
     let dir = instance_dir(&id)?;
     let start_lock = private_file(&dir.join("start.lock"), false)?;
@@ -442,7 +533,7 @@ pub fn dispatch() -> Result<Option<i32>> {
     // Register a kernel-backed lease before checking or creating the daemon.
     // The control server may already have begun stopping; ensure_proxy handles that case.
     let lease = Lease::new(&dir)?;
-    let r = ensure_proxy(&config, &key, &dir, &id)?;
+    let (r, created) = ensure_proxy(&config, &key, &dir, &id)?;
     drop(start_lock);
     if operation == "url" { println!("{}", r.url); return Ok(Some(0)); }
     eprintln!("Proxy: {}", r.url);
@@ -450,14 +541,14 @@ pub fn dispatch() -> Result<Option<i32>> {
     if source.is_some_and(|(kind, _)| kind == "stdin") {
         if let Ok(tty) = File::open("/dev/tty") { command.stdin(Stdio::from(tty)); }
     }
-    command.args(codex_args)
-        .arg("-c").arg(format!("model_provider={}", serde_json::to_string(&settings.provider)?))
+    command.arg("-c").arg(format!("model_provider={}", serde_json::to_string(&settings.provider)?))
         .arg("-c").arg(format!("model_providers.{}.base_url={}", settings.provider, serde_json::to_string(&r.url)?))
         .arg("-c").arg(format!("model_providers.{}.env_key=\"CODEX_RATE_PROXY_API_KEY\"", settings.provider))
         .arg("-c").arg(format!("model_providers.{}.requires_openai_auth=false", settings.provider))
         .arg("-c").arg(format!("model_providers.{}.request_max_retries=0", settings.provider))
         .arg("-c").arg(format!("model_providers.{}.stream_max_retries=0", settings.provider))
         .arg("-c").arg(format!("model_providers.{}.supports_websockets=false", settings.provider))
+        .args(codex_args)
         .env("CODEX_RATE_PROXY_API_KEY", &key);
     // Preserve other proxy bypass entries while guaranteeing loopback bypass for the child.
     let bypass = env::var("NO_PROXY").or_else(|_| env::var("no_proxy")).unwrap_or_default();
@@ -469,8 +560,12 @@ pub fn dispatch() -> Result<Option<i32>> {
         if libc::fcntl(lease_fd, libc::F_SETFD, 0) < 0 { return Err(std::io::Error::last_os_error()); }
         Ok(())
     }); }
-    let status = command.status().map_err(|_| "could not launch Codex; check [launcher] codex_binary")?;
+    let status = command.status();
     drop(lease);
+    if status.as_ref().map_or(true, |s| !s.success()) {
+        cleanup_failed_launch(&dir, &r, created);
+    }
+    let status = status.map_err(|_| "could not launch Codex; check [launcher] codex_binary")?;
     use std::os::unix::process::ExitStatusExt;
     Ok(Some(status.code().unwrap_or(128 + status.signal().unwrap_or(1))))
 }

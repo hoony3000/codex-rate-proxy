@@ -1,4 +1,4 @@
-"""Observe v0.3.0 lifecycle with a real Codex config error; no LLM calls."""
+"""Regression for the v0.3.0 lifecycle reproduction, using real Codex without LLM calls."""
 import json
 import os
 from pathlib import Path
@@ -44,8 +44,7 @@ with tempfile.TemporaryDirectory(prefix="crp-repro-", dir="/tmp") as tmp:
             print(result.stderr, flush=True)
             current = snapshot()
             print(json.dumps(current), flush=True)
-            assert len(current) == 1, current
-            assert current[0]["state"] != "Z", current
+            assert not current, current
         for name in ("a", "b"):
             folder = home / name
             (folder / "proxy.ini").write_text(config.read_text())
@@ -54,8 +53,14 @@ with tempfile.TemporaryDirectory(prefix="crp-repro-", dir="/tmp") as tmp:
             assert result.returncode != 0
             print(f"COPIED CONFIG folder={name} exit={result.returncode}", flush=True)
             print(json.dumps(snapshot()), flush=True)
-        assert len(snapshot()) == 3
-        print("REPRODUCED: failed Codex leaves live idle daemon; shared config reuses across cwd; copied config paths create distinct daemons.", flush=True)
+            assert not snapshot()
+        (home / ".codex/config.toml").write_text('[model_providers.corp]\nwire_api = "responses"\n')
+        result = run("launch", "--", "exec", "--skip-git-repo-check", "offline reproduction")
+        print("INVALID PROVIDER", result.returncode, result.stderr, flush=True)
+        assert result.returncode != 0
+        assert "name" in result.stderr.lower(), result.stderr
+        assert not snapshot()
+        print("VERIFIED: malformed TOML and invalid provider leave no newly created daemons, including copied INI paths.", flush=True)
     finally:
         print(run("prune").stdout, flush=True)
         time.sleep(1)

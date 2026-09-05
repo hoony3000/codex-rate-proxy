@@ -274,6 +274,75 @@ idle_timeout_seconds = {idle}
         wait_until(lambda: "configuration reload failed" in log_path.read_text())
         self.assertEqual(self.request(url).read(), b'{"hello":"world"}')
 
+    def test_registration_is_explicit_private_and_reusable(self):
+        env = dict(self.env)
+        env.pop("OPENAI_API_KEY")
+        self.cli("register", "alice", "--key-stdin", input=KEY_A + "\n", env=env)
+        path = self.home / ".config/codex-rate-proxy/users/alice.key"
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        expected = self.url()
+        self.assertEqual(self.cli("url", "--config", str(self.config), "--user", "alice", env=env).stdout.strip(), expected)
+        self.assertNotEqual(self.cli("register", "alice", "--key-stdin", input=KEY_B, check=False).returncode, 0)
+        self.assertEqual(path.read_text().strip(), KEY_A)
+        self.cli("register", "alice", "--replace", "--key-stdin", input=KEY_B)
+        other = self.cli("url", "--config", str(self.config), "--user", "alice", env=env).stdout.strip()
+        self.assertNotEqual(other, expected)
+        for args in [("register", "../escape", "--key-stdin"),
+                     ("url", "--config", str(self.config), "--user", "alice", "--key-stdin"),
+                     ("url", "--config", str(self.config), "--user", "missing")]:
+            self.assertNotEqual(self.cli(*args, input=KEY_A, check=False).returncode, 0)
+        path.chmod(0o644)
+        self.assertNotEqual(self.cli("url", "--config", str(self.config), "--user", "alice", check=False).returncode, 0)
+        path.unlink()
+        target = self.home / "target"
+        target.write_text(KEY_A)
+        path.symlink_to(target)
+        self.assertNotEqual(self.cli("url", "--config", str(self.config), "--user", "alice", check=False).returncode, 0)
+
+    def test_failed_new_launch_cleans_up_but_reused_proxy_survives(self):
+        self.mock.write_text("#!/bin/sh\nexit 2\n")
+        result = self.cli("launch", "--config", str(self.config), check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertFalse(self.records())
+        existing = self.url()
+        result = self.cli("launch", "--config", str(self.config), check=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.url(), existing)
+        self.cli("prune")
+        wait_until(lambda: not self.records())
+        self.mock.unlink()
+        self.assertNotEqual(self.cli("launch", "--config", str(self.config), check=False).returncode, 0)
+        self.assertFalse(self.records())
+
+    def test_shared_config_reuses_across_folders_and_daemon_has_neutral_cwd(self):
+        default = self.home / ".config/codex-rate-proxy/config.ini"
+        default.parent.mkdir(parents=True)
+        default.write_text(self.config.read_text())
+        urls = []
+        for name in ("project-a", "project-b"):
+            folder = self.home / name
+            folder.mkdir()
+            urls.append(subprocess.run([BIN, "url"], cwd=folder, env=self.env,
+                capture_output=True, text=True, check=True, timeout=25).stdout.strip())
+        self.assertEqual(urls[0], urls[1])
+        self.assertEqual(len(self.records()), 1)
+        path = self.records()[0]
+        rec = json.loads(path.read_text())
+        self.assertEqual(Path(os.readlink(f'/proc/{rec["pid"]}/cwd')), path.parent)
+
+    def test_registered_launch_forwards_subcommand_and_literal_arguments(self):
+        self.cli("register", "alice", "--key-stdin", input=KEY_A)
+        report, release = self.home / "report", self.home / "release"
+        release.touch()
+        env = dict(self.env, MOCK_REPORT=str(report), MOCK_RELEASE=str(release))
+        env.pop("OPENAI_API_KEY")
+        args = ["exec", "--", "a prompt with spaces; $literal"]
+        self.cli("launch", "--config", str(self.config), "--user", "alice", "--", *args, env=env)
+        info = json.loads(report.read_text())
+        self.assertEqual(info["args"][-len(args):], args)
+        self.assertTrue(info["key_ok"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
