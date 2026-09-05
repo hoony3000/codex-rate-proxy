@@ -485,7 +485,7 @@ fn list_or_prune(operation: &str, dry_run: bool) -> Result<()> {
         match control(&dir, &r, "status") {
             Ok(s) => {
                 let unused = s.sessions == 0 && s.requests == 0;
-                println!("{} sessions={} requests={} idle={}s {}", r.url, s.sessions, s.requests,
+                println!("{} pid={} sessions={} requests={} idle={}s {}", r.url, r.pid, s.sessions, s.requests,
                     s.idle_seconds, if s.stopping { "stopping" } else if unused { "unused" } else { "active" });
                 if operation == "prune" && unused && !dry_run {
                     // The server rechecks its state atomically; never kill by a stale PID.

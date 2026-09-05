@@ -68,9 +68,13 @@ struct RateState {
 
 type Ini = HashMap<String, HashMap<String, String>>;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     if let Some(code) = launcher::dispatch()? { std::process::exit(code); }
+    // Launcher/control commands need no worker pool; each proxy uses just two async workers.
+    tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?.block_on(serve())
+}
+
+async fn serve() -> Result<(), Box<dyn Error>> {
     let is_managed = env::args().nth(1).as_deref() == Some("__managed");
     let config_path = parse_args()?;
     let managed = if is_managed { Some(launcher::bootstrap(&config_path)?) } else { None };

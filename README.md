@@ -257,7 +257,7 @@ nohup ~/.local/bin/codex-rate-proxy > "$HOME/.config/codex-rate-proxy/proxy.log"
 echo $! > "$HOME/.config/codex-rate-proxy/proxy.pid"
 ```
 
-With csh or tcsh, use `>&` to redirect both standard output and standard error.
+With csh or tcsh, use `>>&` to append both standard output and standard error.
 `>!` safely replaces an existing PID file even when `noclobber` is enabled:
 
 ```csh

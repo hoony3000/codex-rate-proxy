@@ -18,6 +18,8 @@ BIN = str(Path(sys.argv.pop(1)).resolve())
 KEY_A = "fake-integration-key-a"
 KEY_B = "fake-integration-key-b"
 STREAM_RELEASE = threading.Event()
+RETRY_SEEN = set()
+RETRY_LOCK = threading.Lock()
 
 
 class Upstream(http.server.BaseHTTPRequestHandler):
@@ -25,6 +27,16 @@ class Upstream(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        if self.path.endswith("/retry"):
+            with RETRY_LOCK:
+                first = body not in RETRY_SEEN
+                RETRY_SEEN.add(body)
+            if first:
+                self.send_response(429)
+                self.send_header("Retry-After", "1")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
         if self.path.endswith("/limited"):
             self.send_response(429)
             self.send_header("Retry-After", "1")
@@ -235,6 +247,32 @@ idle_timeout_seconds = {idle}
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             list(pool.map(lambda _: self.request(url).read(), range(3)))
         self.assertGreaterEqual(time.monotonic() - began, 0.75)
+
+    def test_retry_then_success(self):
+        self.write_config(retries=2)
+        url = self.url()
+        began = time.monotonic()
+        body = b"retry-test-unique-body"
+        self.assertEqual(self.request(url, path="/retry", data=body).read(), body)
+        self.assertGreaterEqual(time.monotonic() - began, 0.9)
+
+    def test_reload_and_invalid_config_keep_existing_proxy(self):
+        url = self.url()
+        rec_path = self.records()[0]
+        rec = json.loads(rec_path.read_text())
+        log_path = rec_path.parent / "proxy.log"
+        self.write_config(interval=0.4)
+        os.kill(rec["pid"], signal.SIGHUP)
+        wait_until(lambda: "configuration reloaded:" in log_path.read_text())
+        self.assertEqual(self.url(), url)
+        self.request(url).read()
+        began = time.monotonic()
+        self.request(url).read()
+        self.assertGreaterEqual(time.monotonic() - began, 0.35)
+        self.config.write_text("[rate_limit]\nmin_interval_seconds=bad\n")
+        os.kill(rec["pid"], signal.SIGHUP)
+        wait_until(lambda: "configuration reload failed" in log_path.read_text())
+        self.assertEqual(self.request(url).read(), b'{"hello":"world"}')
 
 
 if __name__ == "__main__":
