@@ -26,6 +26,9 @@ use tokio::{
 const DEFAULT_CONFIG_DIR: &str = ".config/codex-rate-proxy";
 const DEFAULT_CONFIG_NAME: &str = "config.ini";
 
+#[cfg(target_os = "linux")]
+mod launcher;
+
 #[derive(Clone, Debug)]
 struct Settings {
     listen_host: String,
@@ -39,6 +42,9 @@ struct Settings {
     backoff_max: Duration,
     backoff_jitter: Duration,
     forward_proxy: Option<String>,
+    idle_timeout: Duration,
+    codex_binary: String,
+    provider: String,
 }
 
 #[derive(Clone)]
@@ -50,28 +56,46 @@ struct RuntimeConfig {
 #[derive(Clone)]
 struct AppState {
     runtime: Arc<RwLock<RuntimeConfig>>,
-    last_upstream_start: Arc<Mutex<Option<Instant>>>,
+    rate: Arc<Mutex<RateState>>,
+    managed: Option<Arc<launcher::Managed>>,
+}
+
+#[derive(Default)]
+struct RateState {
+    last_start: Option<Instant>,
+    blocked_until: Option<Instant>,
 }
 
 type Ini = HashMap<String, HashMap<String, String>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    if let Some(code) = launcher::dispatch()? { std::process::exit(code); }
+    let is_managed = env::args().nth(1).as_deref() == Some("__managed");
     let config_path = parse_args()?;
-    let settings = Arc::new(load_settings(&config_path)?);
+    let managed = if is_managed { Some(launcher::bootstrap(&config_path)?) } else { None };
+    let mut settings = load_settings(&config_path)?;
+    if is_managed { settings.listen_host = "127.0.0.1".into(); settings.listen_port = 0; }
+    let settings = Arc::new(settings);
     let client = build_client(&settings)?;
     let state = AppState {
         runtime: Arc::new(RwLock::new(RuntimeConfig {
             settings: Arc::clone(&settings),
             client,
         })),
-        last_upstream_start: Arc::new(Mutex::new(None)),
+        rate: Arc::new(Mutex::new(RateState::default())),
+        managed: managed.clone(),
     };
 
     let bind_address: SocketAddr = format!("{}:{}", settings.listen_host, settings.listen_port)
         .parse()
         .map_err(|error| format!("invalid listen address: {error}"))?;
     let listener = TcpListener::bind(bind_address).await?;
+    let bind_address = listener.local_addr()?;
+    if let Some(manager) = &managed {
+        manager.publish(format!("http://{bind_address}/v1"))?;
+        manager.watchdog(state.clone());
+    }
 
     log(&format!("listening on http://{bind_address}"));
     log(&format!("target: {}", settings.upstream_base_url));
@@ -90,15 +114,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let app = Router::new().fallback(proxy_request).with_state(state);
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(managed.clone()))
         .await?;
+    if let Some(manager) = &managed { manager.cleanup(); }
     Ok(())
 }
 
-async fn shutdown_signal() {
-    if tokio::signal::ctrl_c().await.is_ok() {
-        log("stopping");
+async fn shutdown_signal(managed: Option<Arc<launcher::Managed>>) {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {},
+        _ = term.recv() => {},
+        _ = async {
+            loop {
+                if managed.as_ref().is_some_and(|m| m.stop.load(std::sync::atomic::Ordering::SeqCst)) { break; }
+                sleep(Duration::from_millis(100)).await;
+            }
+        } => {},
     }
+    log("stopping");
 }
 
 #[cfg(unix)]
@@ -135,6 +170,10 @@ async fn reload_runtime_config(state: &AppState, config_path: &Path) {
     };
 
     let current = state.runtime.read().await;
+    if state.managed.is_some() && new_settings.upstream_base_url != current.settings.upstream_base_url {
+        log("managed proxy reload rejected: upstream changes require a new launch");
+        return;
+    }
     if new_settings.listen_host != current.settings.listen_host
         || new_settings.listen_port != current.settings.listen_port
     {
@@ -167,6 +206,19 @@ async fn reload_runtime_config(state: &AppState, config_path: &Path) {
 }
 
 async fn proxy_request(State(state): State<AppState>, request: Request) -> Response<Body> {
+    let activity = if let Some(manager) = &state.managed {
+        let authorization = request.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+        let supplied = authorization.and_then(|s| s.split_once(' '))
+            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+            .map(|(_, key)| key);
+        if supplied != Some(manager.key.as_str()) || request.headers().get_all(header::AUTHORIZATION).iter().count() != 1 {
+            return response_with_body(StatusCode::UNAUTHORIZED, "text/plain", "API key does not match this proxy\n");
+        }
+        match manager.activity() {
+            Some(guard) => Some(guard),
+            None => return response_with_body(StatusCode::SERVICE_UNAVAILABLE, "text/plain", "Proxy stopping; launch again\n"),
+        }
+    } else { None };
     if request.method() == Method::GET && request.uri().path() == "/health" {
         return response_with_body(StatusCode::OK, "application/json", "{\"status\":\"ok\"}\n");
     }
@@ -220,25 +272,30 @@ async fn proxy_request(State(state): State<AppState>, request: Request) -> Respo
             }
         };
 
-        if upstream.status() == StatusCode::TOO_MANY_REQUESTS
-            && attempt < settings.max_retries
-        {
+        if upstream.status() == StatusCode::TOO_MANY_REQUESTS {
             let retry_after = upstream
                 .headers()
                 .get(header::RETRY_AFTER)
                 .and_then(|value| value.to_str().ok())
                 .and_then(parse_retry_after);
             let delay = retry_delay(&settings, attempt, retry_after);
+            {
+                let mut rate = state.rate.lock().await;
+                let until = Instant::now() + delay;
+                rate.blocked_until = Some(rate.blocked_until.map_or(until, |old| old.max(until)));
+            }
+            if attempt == settings.max_retries {
+                return stream_upstream_response(upstream, activity);
+            }
             drop(upstream);
             log(&format!(
                 "upstream returned 429; retrying in {:.1} seconds",
                 delay.as_secs_f64()
             ));
-            sleep(delay).await;
             continue;
         }
 
-        return stream_upstream_response(upstream);
+        return stream_upstream_response(upstream, activity);
     }
 
     response_with_body(
@@ -248,10 +305,12 @@ async fn proxy_request(State(state): State<AppState>, request: Request) -> Respo
     )
 }
 
-fn stream_upstream_response(upstream: reqwest::Response) -> Response<Body> {
+fn stream_upstream_response(upstream: reqwest::Response, activity: Option<launcher::Activity>) -> Response<Body> {
     let status = upstream.status();
     let headers = upstream.headers().clone();
-    let stream = upstream.bytes_stream().map(|item| {
+    let stream = upstream.bytes_stream().map(move |item| {
+        // Keep the activity guard alive until EOF or downstream cancellation drops the body.
+        let _keep_alive = &activity;
         item.map_err(|error| -> Box<dyn Error + Send + Sync> { Box::new(error) })
     });
     let mut response = Response::new(Body::from_stream(stream));
@@ -262,19 +321,21 @@ fn stream_upstream_response(upstream: reqwest::Response) -> Response<Body> {
 }
 
 async fn wait_for_upstream_turn(state: &AppState, min_interval: Duration) {
-    let mut last_start = state.last_upstream_start.lock().await;
-    if let Some(previous) = *last_start {
-        let elapsed = previous.elapsed();
-        if elapsed < min_interval {
-            let delay = min_interval - elapsed;
-            log(&format!(
-                "rate limit: waiting {:.1} seconds",
-                delay.as_secs_f64()
-            ));
-            sleep(delay).await;
-        }
+    loop {
+        let delay = {
+            let mut rate = state.rate.lock().await;
+            let now = Instant::now();
+            let interval_due = rate.last_start.map(|last| last + min_interval).unwrap_or(now);
+            let due = interval_due.max(rate.blocked_until.unwrap_or(now));
+            if due <= now {
+                rate.last_start = Some(now);
+                return;
+            }
+            due - now
+        };
+        // Do not hold the lock while sleeping: another 429 can extend the shared cooldown.
+        sleep(delay).await;
     }
-    *last_start = Some(Instant::now());
 }
 
 fn retry_delay(settings: &Settings, attempt: u32, retry_after: Option<Duration>) -> Duration {
@@ -299,6 +360,7 @@ fn random_jitter(maximum: Duration) -> Duration {
 
 fn parse_retry_after(value: &str) -> Option<Duration> {
     if let Ok(seconds) = value.trim().parse::<f64>() {
+        if !seconds.is_finite() || seconds > 86400.0 { return None; }
         return Some(Duration::from_secs_f64(seconds.max(0.0)));
     }
     let retry_at = httpdate::parse_http_date(value).ok()?;
@@ -364,6 +426,7 @@ fn response_with_body(status: StatusCode, content_type: &str, body: &str) -> Res
 
 fn build_client(settings: &Settings) -> Result<reqwest::Client, Box<dyn Error>> {
     let mut builder = reqwest::Client::builder()
+        .no_proxy()
         .http1_only()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(settings.upstream_timeout);
@@ -378,6 +441,7 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
     let mut config_path = None;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
+            "__managed" => {},
             "-c" | "--config" => {
                 let value = arguments
                     .next()
@@ -386,7 +450,11 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
             }
             "-h" | "--help" => {
                 println!(
-                    "codex-rate-proxy\n\nUsage: codex-rate-proxy [--config PATH]\n\n\
+                    "codex-rate-proxy\n\nUsage: codex-rate-proxy [--config PATH]\n\
+                     codex-rate-proxy launch|url|stop [--config PATH] [--key-file PATH | --key-env NAME | --key-stdin | --ask-key]\n\
+                     codex-rate-proxy launch [OPTIONS] -- [CODEX ARGS]\n\
+                     codex-rate-proxy list\ncodex-rate-proxy prune [--dry-run]\n\n\
+                     Default key: OPENAI_API_KEY, otherwise hidden prompt.\n\
                      Default config: ~/.config/codex-rate-proxy/{DEFAULT_CONFIG_NAME}"
                 );
                 std::process::exit(0);
@@ -435,11 +503,18 @@ fn load_settings(path: &Path) -> Result<Settings, Box<dyn Error>> {
             "1",
         )?,
         forward_proxy: optional(&ini, "forward_proxy", "http"),
+        idle_timeout: duration_value(&ini, "lifecycle", "idle_timeout_seconds", "1800")?,
+        codex_binary: get(&ini, "launcher", "codex_binary", "codex"),
+        provider: get(&ini, "launcher", "provider", "corp"),
     };
 
     if settings.listen_host.is_empty() {
         return Err("[server] host must not be empty".into());
     }
+    if settings.provider.is_empty() || !settings.provider.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err("[launcher] provider must contain only letters, digits, underscore or hyphen".into());
+    }
+    if settings.codex_binary.is_empty() { return Err("[launcher] codex_binary must not be empty".into()); }
     if settings.max_request_body_bytes == 0 {
         return Err("[upstream] max_request_body_bytes must be greater than zero".into());
     }
@@ -516,8 +591,8 @@ fn duration_value(
     default: &str,
 ) -> Result<Duration, Box<dyn Error>> {
     let seconds: f64 = parse_value(ini, section, key, default)?;
-    if !seconds.is_finite() || seconds < 0.0 {
-        return Err(format!("[{section}] {key} must be a non-negative number").into());
+    if !seconds.is_finite() || !(0.0..=31_536_000.0).contains(&seconds) {
+        return Err(format!("[{section}] {key} must be between 0 and 31536000 seconds").into());
     }
     Ok(Duration::from_secs_f64(seconds))
 }

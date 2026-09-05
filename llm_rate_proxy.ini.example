@@ -17,3 +17,15 @@ backoff_jitter_seconds = 1
 [forward_proxy]
 # Leave these empty when the upstream API is directly reachable.
 http = http://proxy.example.com:8080
+
+# Common launcher policy only: no API keys or personal key-file paths here.
+[launcher]
+# Executable on PATH or an absolute path to Codex.
+codex_binary = codex
+# Existing custom provider in ~/.codex/config.toml.
+provider = corp
+
+[lifecycle]
+# Stop after no sessions AND no active requests for this many seconds.
+# Managed mode only; checked approximately every two seconds.
+idle_timeout_seconds = 1800
