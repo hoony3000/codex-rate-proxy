@@ -7,6 +7,7 @@ description = "Rate-limiting HTTP proxy for Codex CLI and OpenAI-compatible Resp
 publish = false
 
 [dependencies]
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 bytes = "1"
 futures-util = "0.3"

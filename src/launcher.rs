@@ -13,6 +13,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
+mod credentials;
 
 #[derive(Serialize, Deserialize)]
 struct Bootstrap {
@@ -369,57 +370,6 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-fn profile_path(name: &str) -> Result<PathBuf> {
-    if name.is_empty() || name.len() > 64 || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
-        return Err("user name must be 1-64 ASCII letters, digits, underscores or hyphens".into());
-    }
-    let home = env::var_os("HOME").ok_or("HOME is not set")?;
-    let dir = PathBuf::from(home).join(".config/codex-rate-proxy/users");
-    private_dir(&dir)?;
-    Ok(dir.join(format!("{name}.key")))
-}
-
-fn registered_key(name: &str) -> Result<String> {
-    let path = profile_path(name)?;
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path).map_err(|_| "cannot read registered user; run register NAME first")?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
-        return Err("registered key must be a regular file with permissions 600".into());
-    }
-    let mut key = String::new();
-    file.take(16386).read_to_string(&mut key)?;
-    let key = key.trim_end_matches(['\r', '\n']).to_owned();
-    validate_key(&key)?;
-    Ok(key)
-}
-
-fn register(name: &str, source: Option<(&str, &str)>, replace: bool) -> Result<()> {
-    let path = profile_path(name)?;
-    let dir = path.parent().ok_or("invalid profile directory")?;
-    let guard = private_file(&dir.join("register.lock"), false)?;
-    lock(&guard, false)?;
-    if fs::symlink_metadata(&path).is_ok() && !replace {
-        return Err("user already registered; use --replace to update its key".into());
-    }
-    // Registration is explicit: do not silently save an inherited account-wide key.
-    let key = read_key(source.or(Some(("ask", ""))))?;
-    let temporary = dir.join(format!(".{}.tmp", random_id()?));
-    let result = (|| -> Result<()> {
-        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temporary)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        writeln!(file, "{key}")?;
-        file.sync_all()?;
-        fs::rename(&temporary, &path)?;
-        File::open(dir)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() { let _ = fs::remove_file(&temporary); }
-    result?;
-    println!("registered {name}; launch with --user {name}");
-    Ok(())
-}
-
 fn cleanup_failed_launch(dir: &Path, r: &Record, created: Option<std::sync::mpsc::Receiver<()>>) {
     let Some(reaped) = created else { return; };
     let result = (|| -> Result<()> {
@@ -459,7 +409,17 @@ fn read_key(source: Option<(&str, &str)>) -> Result<String> {
 pub fn dispatch() -> Result<Option<i32>> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let operation = arguments.first().map(String::as_str).unwrap_or("");
-    if !matches!(operation, "launch" | "url" | "list" | "stop" | "prune" | "register") { return Ok(None); }
+    if !matches!(operation, "launch" | "url" | "list" | "stop" | "prune" | "register" | "unregister" | "encrypt-keys") { return Ok(None); }
+    if operation == "unregister" {
+        if arguments.len() != 2 { return Err("usage: codex-rate-proxy unregister NAME".into()); }
+        credentials::unregister(&arguments[1])?;
+        return Ok(Some(0));
+    }
+    if operation == "encrypt-keys" {
+        if arguments.len() != 1 { return Err("usage: codex-rate-proxy encrypt-keys".into()); }
+        credentials::encrypt_all()?;
+        return Ok(Some(0));
+    }
     let mut config = default_config_path()?;
     let mut source: Option<(&str, &str)> = None;
     let mut dry_run = false;
@@ -504,7 +464,7 @@ pub fn dispatch() -> Result<Option<i32>> {
     }
     if !codex_args.is_empty() && operation != "launch" { return Err("Codex arguments are only valid for launch".into()); }
     if let Some(name) = registration {
-        register(name, source, replace)?;
+        credentials::register(name, source, replace)?;
         return Ok(Some(0));
     }
     if matches!(operation, "list" | "prune") {
@@ -514,7 +474,7 @@ pub fn dispatch() -> Result<Option<i32>> {
     }
     let config = fs::canonicalize(config)?;
     let settings = load_settings(&config)?;
-    let key = match user { Some(name) => registered_key(name)?, None => read_key(source)? };
+    let key = match user { Some(name) => credentials::registered_key(name)?, None => read_key(source)? };
     let id = identity(&key, &settings.upstream_base_url, &config);
     let dir = instance_dir(&id)?;
     let start_lock = private_file(&dir.join("start.lock"), false)?;

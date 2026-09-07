@@ -70,7 +70,7 @@ codex-rate-proxy stop --user hoony
 ```
 
 Names contain 1-64 ASCII letters, digits, underscores or hyphens. Existing
-registrations require `--replace` to update. Keys are stored as plaintext in
+registrations require `--replace` to update. Keys are encrypted in
 `~/.config/codex-rate-proxy/users/NAME.key` with permissions `600`; the users
 directory has permissions `700`. Shared INI files contain no personal paths.
 `--user` selects a saved key and cannot be combined with another key source.
@@ -79,6 +79,49 @@ Without `--user`, the existing environment/prompt behavior remains available.
 Profiles are a convenience, not isolation between people sharing one Linux UID.
 Two names with the same key and configuration reuse the same proxy.
 Replacing a saved key affects future launches; existing sessions keep their key.
+
+Credential encryption uses [RustCrypto XChaCha20-Poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/)
+with a fresh random nonce on each write and authentication bound to the user
+name. Files are binary, versioned envelopes; editing or renaming them causes
+decryption to fail. The random 256-bit master key is generated locally at
+`~/.local/share/codex-rate-proxy/master.key` (file `600`, directory `700`).
+No additional password, environment variable, INI option, keyring service or
+runtime package installation is needed. Crypto code is linked into the binary.
+
+This protects a credential file disclosed on its own. Anyone who can read both
+the credential and master key can decrypt it, including people sharing the same
+Linux UID and backups containing both paths. It does not protect against a
+compromised account or inspection of running processes. Back up the master key
+securely if you need to restore registrations; losing it requires re-registering
+the API keys. A missing master key is never silently recreated while encrypted
+registrations remain.
+
+Existing v0.4.0 plaintext registrations are encrypted automatically on first use.
+To convert **all** saved registrations immediately after upgrading:
+
+```sh
+codex-rate-proxy encrypt-keys
+```
+
+This command requires no INI or API connection, validates existing encrypted
+files too, and can be repeated. It stops on invalid files; files already converted
+remain encrypted. Conversion atomically replaces each file without a plaintext
+backup. Old backups/filesystem snapshots are not erased, and filesystem recovery
+of previously stored plaintext is not prevented. Older binaries cannot read the
+encrypted format; use the new binary for all registered-user commands.
+
+To remove one saved registration:
+
+```sh
+codex-rate-proxy unregister hoony
+```
+
+`unregister` requires no API key or INI, works even if the credential or master
+key is damaged, and is harmless if the name is already absent. It removes only
+that name's credential file. It retains the master key and other registrations,
+does not revoke the key at the API provider, and does not stop existing sessions
+or proxies. For an unused proxy you also want stopped, run `stop --user hoony`
+before unregistering, or use `prune` afterward. File removal is not secure erasure.
 
 Arguments after the launcher's `--` are passed unchanged to Codex, including
 subcommands and another `--` for literal arguments. Launcher configuration
