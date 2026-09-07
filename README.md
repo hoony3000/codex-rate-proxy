@@ -1,326 +1,121 @@
 # Codex Rate Proxy
 
-A small local rate-limiting proxy for Codex CLI and OpenAI-compatible
-Responses APIs. The primary implementation is a static Rust binary for older
-Linux systems such as CentOS 7.4. A Python standard-library implementation is
-also included as a fallback.
+Codex CLI의 요청 간격과 HTTP 429 재시도를 제어하는 로컬 프록시입니다.
+요청과 응답 본문은 변경하지 않으며, SSE 스트리밍을 그대로 전달합니다.
 
-It is useful when an upstream API returns HTTP `429 Too Many Requests` because
-Codex sends several model requests in a short period of time.
+x86_64 CentOS 7.4용 정적 바이너리를 제공합니다. 실행 서버에 Rust·Python 설치나
+root 권한이 필요하지 않습니다. 현재 Rust 버전은 **HTTP API와 HTTP 사내 프록시**를 지원합니다.
 
-## Features
+## 사용자 안내
 
-- Minimum interval between upstream request starts
-- Exponential backoff for HTTP 429 responses
-- Honors the upstream `Retry-After` header
-- Streams SSE responses without changing their payload
-- Reads runtime options from an INI configuration file
-- Listens on `127.0.0.1` by default
-- Static `x86_64-unknown-linux-musl` release binary
-- No Python, OpenSSL, libcurl, or root access required at runtime
-- One-command Codex launch with per-key proxy reuse and automatic port allocation
-- Idle cleanup with active Codex sessions and streaming requests protected
-- Named user registration for remembering each person's API key
+관리자가 아래 설치와 공통 설정을 마친 뒤 사용하세요. 명령은 Bash와 csh/tcsh에서 동일합니다.
 
-## Launch Codex (Linux, Bash and csh/tcsh)
-
-**`-u`** is equivalent to `--user` for `launch`, `url` and `stop`:
+### 최초 등록 및 실행
 
 ```sh
-codex-rate-proxy launch -u hoony
-codex-rate-proxy launch -u hoony -- resume --last
-codex-rate-proxy url -u hoony
-codex-rate-proxy stop -u hoony
-```
-
-The existing `--user` spelling remains supported. Use either spelling once;
-combining `-u` and `--user`, or mixing either with another key source, is rejected.
-
-The Rust `launch` command prepares or reuses a proxy and starts Codex for you.
-Keep one shared INI at `~/.config/codex-rate-proxy/config.ini`. Define your
-existing custom provider (default `corp`) and model in `~/.codex/config.toml`.
-No per-user port or key-file path belongs in the shared INI.
-
-```sh
-# Register once (hidden prompt), then launch without entering the key again.
+# 최초 한 번 API 키 입력: 화면에 표시되지 않습니다.
 codex-rate-proxy register hoony
-codex-rate-proxy launch --user hoony
-codex-rate-proxy launch --user hoony -- resume --last
 
-# Uses this shell's OPENAI_API_KEY; asks with echo disabled if it is missing.
-codex-rate-proxy launch
+# 등록한 사용자로 Codex 실행
+codex-rate-proxy launch -u hoony
 
-# Explicit key sources (choose one). Key files contain one line.
-codex-rate-proxy launch --key-file /path/to/my-key
-codex-rate-proxy launch --key-env MY_LLM_KEY
-codex-rate-proxy launch --ask-key
-key-producing-command | codex-rate-proxy launch --key-stdin
-
-# Pass additional Codex arguments after --.
-codex-rate-proxy launch -- --model YOUR_MODEL
-
-# Prepare/reuse a proxy and print its URL without starting Codex.
-codex-rate-proxy url --key-file /path/to/my-key
+# -- 뒤에는 Codex 명령과 옵션을 그대로 전달
+codex-rate-proxy launch -u hoony -- resume --last
+codex-rate-proxy launch -u hoony -- --model YOUR_MODEL
 ```
 
-These commands have the same syntax in Bash and csh/tcsh; no `nohup` or PID
-file commands are needed for managed mode. `launch` prints the local URL to
-stderr; `url` prints only the URL to stdout. With `--key-stdin`, input must end
-at EOF; Codex reconnects stdin to `/dev/tty` when a terminal is available.
+`hoony` 대신 자신의 등록 이름을 사용하세요. 이름은 영문자·숫자·밑줄·하이픈 1~64자입니다.
+`-u`와 `--user`는 동일합니다. 매번 자신의 이름을 지정해야 합니다.
 
-### Registered users
+키와 API 주소, 공통 설정 파일 경로가 같으면 기존 프록시를 재사용하고,
+없으면 자동으로 포트를 할당합니다. Codex에 로컬 URL도 자동 전달하므로
+사용자가 포트나 `base_url`을 따로 설정할 필요가 없습니다.
 
-`register NAME` saves a key only when explicitly requested. It prompts with
-echo disabled by default, even if `OPENAI_API_KEY` exists. For noninteractive
-registration, choose `--key-file PATH`, `--key-env NAME` or `--key-stdin`:
+### 키 입력 방법 및 변경
 
 ```sh
+# 직접 입력 대신 한 줄짜리 키 파일 또는 환경변수로 등록
 codex-rate-proxy register hoony --key-file /path/to/my-key
-codex-rate-proxy register hoony --replace --key-env MY_LLM_KEY
-codex-rate-proxy url --user hoony
-codex-rate-proxy stop --user hoony
+codex-rate-proxy register hoony --key-env MY_LLM_KEY
+
+# 등록된 키 교체
+codex-rate-proxy register hoony --replace
+
+# 등록 없이 실행: OPENAI_API_KEY 사용, 없으면 직접 입력
+codex-rate-proxy launch
 ```
 
-Names contain 1-64 ASCII letters, digits, underscores or hyphens. Existing
-registrations require `--replace` to update. Keys are encrypted in
-`~/.config/codex-rate-proxy/users/NAME.key` with permissions `600`; the users
-directory has permissions `700`. Shared INI files contain no personal paths.
-`--user` selects a saved key and cannot be combined with another key source.
-There is no account-wide default user: each person selects their own name.
-Without `--user`, the existing environment/prompt behavior remains available.
-Profiles are a convenience, not isolation between people sharing one Linux UID.
-Two names with the same key and configuration reuse the same proxy.
-Replacing a saved key affects future launches; existing sessions keep their key.
+`launch`에서도 `--key-file PATH`, `--key-env NAME`, `--ask-key`,
+`--key-stdin`을 사용할 수 있습니다. `-u`를 포함해 키 입력 방법은 하나만 선택하세요.
+키를 교체해도 이미 실행 중인 세션은 기존 키를 사용합니다.
 
-Credential encryption uses [RustCrypto XChaCha20-Poly1305](https://docs.rs/chacha20poly1305/0.10.1/chacha20poly1305/)
-with a fresh random nonce on each write and authentication bound to the user
-name. Files are binary, versioned envelopes; editing or renaming them causes
-decryption to fail. The random 256-bit master key is generated locally at
-`~/.local/share/codex-rate-proxy/master.key` (file `600`, directory `700`).
-No additional password, environment variable, INI option, keyring service or
-runtime package installation is needed. Crypto code is linked into the binary.
-
-This protects a credential file disclosed on its own. Anyone who can read both
-the credential and master key can decrypt it, including people sharing the same
-Linux UID and backups containing both paths. It does not protect against a
-compromised account or inspection of running processes. Back up the master key
-securely if you need to restore registrations; losing it requires re-registering
-the API keys. A missing master key is never silently recreated while encrypted
-registrations remain.
-
-Existing v0.4.0 plaintext registrations are encrypted automatically on first use.
-To convert **all** saved registrations immediately after upgrading:
+### URL 확인, 종료 및 등록 해제
 
 ```sh
-codex-rate-proxy encrypt-keys
-```
+# Codex 실행 없이 프록시를 준비하고 URL만 출력
+codex-rate-proxy url -u hoony
 
-This command requires no INI or API connection, validates existing encrypted
-files too, and can be repeated. It stops on invalid files; files already converted
-remain encrypted. Conversion atomically replaces each file without a plaintext
-backup. Old backups/filesystem snapshots are not erased, and filesystem recovery
-of previously stored plaintext is not prevented. Older binaries cannot read the
-encrypted format; use the new binary for all registered-user commands.
+# 자신의 미사용 프록시 종료
+codex-rate-proxy stop -u hoony
 
-To remove one saved registration:
-
-```sh
+# 저장된 사용자 등록 삭제
 codex-rate-proxy unregister hoony
 ```
 
-`unregister` requires no API key or INI, works even if the credential or master
-key is damaged, and is harmless if the name is already absent. It removes only
-that name's credential file. It retains the master key and other registrations,
-does not revoke the key at the API provider, and does not stop existing sessions
-or proxies. For an unused proxy you also want stopped, run `stop --user hoony`
-before unregistering, or use `prune` afterward. File removal is not secure erasure.
+`stop`은 활성 세션이나 요청이 있으면 종료하지 않습니다.
+`unregister`는 저장된 등록 정보만 삭제하며, 실행 중인 프록시를 종료하거나
+API 제공자 측의 키를 폐기하지 않습니다.
 
-Arguments after the launcher's `--` are passed unchanged to Codex, including
-subcommands and another `--` for literal arguments. Launcher configuration
-overrides precede these arguments, so Codex sees them as options, not prompt text.
-Any explicit Codex configuration overrides you supply are processed by Codex.
+## 관리자 안내
 
-The launcher passes the local `base_url`, provider selection, a dedicated
-`CODEX_RATE_PROXY_API_KEY` environment variable and retry/transport overrides
-to the Codex child. It never rewrites the shared Codex configuration or the
-parent shell's environment. Existing `NO_PROXY` entries are retained and
-loopback is added for the child. Forward-proxy settings for the Rust upstream
-connection come exclusively from INI (ambient HTTP_PROXY is ignored).
+여기서 관리자는 공통 설정과 프로세스를 관리하는 사람을 뜻하며, root 권한은 필요하지 않습니다.
 
-| Situation | Result |
-| --- | --- |
-| Same key, upstream and canonical INI path | Reuse the running proxy |
-| Concurrent launches with the same identity | Create only one proxy |
-| Different key, upstream or canonical INI path | Create an independent proxy |
-| Stale record and no daemon lifetime lock | Recreate with an OS-assigned port |
-| Unresponsive process still holds its lock | Report an error; never blindly kill or duplicate it |
-| Codex exits successfully | Retain until idle timeout for reuse |
-| Codex exits with an error or cannot start | Stop the newly created proxy if no sessions or requests use it |
-| Failed launch reused an existing proxy | Keep the existing proxy |
+### 설치 및 업데이트
 
-The managed HTTP listener requires the matching Bearer key, including on
-`/health`. Requests and 429 cooldown are shared by all sessions on that proxy.
-Already-dispatched requests cannot be recalled when a new 429 arrives. This is
-request pacing, not token counting or an exact TPM limiter. Separate Linux
-accounts/HOME directories or different INI paths do not share limiter state.
-
-### Cleanup
+[최신 릴리스](https://github.com/hoony3000/codex-rate-proxy/releases/latest)에서
+`codex-rate-proxy-x86_64-linux-musl.tar.gz`를 받아 실행 서버로 옮긴 뒤 설치합니다.
+업데이트도 같은 방법이며, 기존 설정 파일은 보존됩니다.
 
 ```sh
-codex-rate-proxy list
-codex-rate-proxy stop --key-file /path/to/my-key
-codex-rate-proxy prune --dry-run
-codex-rate-proxy prune
-```
-
-`stop` accepts the same key-source and `--config` options as `launch`, and
-refuses to stop an instance with active sessions or requests. `list` and
-`prune` cover managed instances under the current HOME, across all keys.
-`prune` immediately stops unused instances; `--dry-run` only lists them.
-Unresponsive instances are kept unless their lifetime lock proves they exited.
-Legacy standalone proxies and unrelated processes are never targeted.
-
-Automatic cleanup waits for no connected sessions AND no active requests,
-streams or queued retries for `idle_timeout_seconds` (default 1800). Checks
-run approximately every two seconds. Codex waiting for input or running tools
-is still active. A kernel-backed lease is inherited by Codex, so killing its
-launcher alone does not mark a surviving child unused. Descendants retaining
-the lease also keep the proxy alive until they exit.
-
-State lives in `~/.local/state/codex-rate-proxy/` with private directory
-permissions. Each instance has a hashed identity, private control token,
-local URL, PID and log; no API key or personal key-file path is saved there.
-Records, control sockets and expired leases are removed on clean shutdown.
-Small lock files and the last log remain intentionally to avoid lock-file
-replacement races; logs are replaced when the same instance is recreated.
-Runtime state should be on a filesystem with working Linux `flock` support.
-The HOME path must fit a Unix socket pathname (108 bytes including the suffix).
-
-Managed daemons use their state directory as their working directory, while
-Codex keeps the directory from which you launched it. Changing project folders
-alone does not create extra proxies when the same shared INI is used. Copies of
-an INI at different canonical paths intentionally represent different instances;
-use the default common INI to share rate state across projects. Empty state
-directories/lock files are not running or zombie processes; use `list` to inspect
-managed instances and `prune` to stop unused ones.
-
-Before this fix, v0.3.0 was tested with real Codex 0.153.2: invalid `config.toml`
-left a live idle daemon (process state `S`, not zombie `Z`); changing folders with
-one common INI reused it, and separate INI paths created separate daemons.
-The reproduction is preserved in commit `797c6ac`; the current test verifies
-cleanup after malformed TOML and invalid provider configuration.
-
-Shared-account processes and files are not a security boundary between people
-using the same Linux UID. API-key authentication prevents accidental cross-key
-use; it does not isolate users sharing that UID. Key material is sent to the
-daemon over a pipe and to Codex in its child environment, never as CLI arguments.
-
-### Shared launcher policy
-
-```ini
-[launcher]
-codex_binary = codex
-provider = corp
-
-[lifecycle]
-idle_timeout_seconds = 1800
-```
-
-No `key_file`, personal paths or key-source preference is stored in INI.
-An explicit key-source flag takes precedence over the default environment lookup.
-Multiple key-source flags are rejected. Empty, multiline or malformed keys fail
-before proxy creation. A managed proxy always binds loopback on an automatic
-port; `[server] host/port` apply only to standalone mode.
-
-SIGHUP still reloads valid policy changes for new requests; existing requests
-keep their original policy. Changing the upstream of a managed proxy is rejected
-on reload: launch again to create an instance with the new identity instead.
-The Python fallback does not implement the Rust launcher/lifecycle features.
-
-## Download a prebuilt binary
-
-Download `codex-rate-proxy-x86_64-linux-musl.tar.gz` from the latest GitHub
-Actions run or from a tagged GitHub Release. The musl binary is statically
-linked and is intended to run on x86_64 CentOS 7.4 without a Rust or Python
-installation.
-
-```bash
 tar -xzf codex-rate-proxy-x86_64-linux-musl.tar.gz
-./install.sh
+sh install.sh
 ```
 
-This installs the executable and initial configuration to:
+| 항목 | 위치 |
+| --- | --- |
+| 실행 파일 | `~/.local/bin/codex-rate-proxy` |
+| 공통 설정 | `~/.config/codex-rate-proxy/config.ini` |
+| 등록된 키 | `~/.config/codex-rate-proxy/users/` |
+| 암호화 마스터 키 | `~/.local/share/codex-rate-proxy/master.key` |
+| 프록시 상태 및 로그 | `~/.local/state/codex-rate-proxy/` |
 
-```text
-~/.local/bin/codex-rate-proxy
-~/.config/codex-rate-proxy/config.ini
-```
-
-`install.sh` preserves an existing `config.ini`. No root access is required.
-The release archive also contains the safe example configuration as
-`config.ini`.
-
-## Build from source
-
-GNU build on the current Linux host:
+`~/.local/bin`을 PATH에 추가하세요. 지속 적용하려면 사용하는 셸의 초기화 파일에도 넣습니다.
 
 ```bash
-cargo test
-cargo build --release
+# Bash (~/.bashrc)
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Static musl build:
-
-```bash
-rustup target add x86_64-unknown-linux-musl
-cargo test
-cargo build --release --target x86_64-unknown-linux-musl
+```csh
+# csh/tcsh (~/.cshrc)
+set path = ( $HOME/.local/bin $path )
+rehash
 ```
 
-The output is:
+### 공통 INI 설정
 
-```text
-target/x86_64-unknown-linux-musl/release/codex-rate-proxy
-```
-
-To publish a release, push a version tag:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The GitHub workflow builds, verifies, packages, checksums, and attaches the
-static binary to the release.
-
-## Python fallback
-
-Copy `llm_rate_proxy.py` to the machine where Codex CLI runs:
-
-```bash
-chmod 700 llm_rate_proxy.py
-```
-
-## Configure
-
-Copy the example configuration and edit the copy:
-
-```bash
-mkdir -p ~/.config/codex-rate-proxy
-cp llm_rate_proxy.ini.example ~/.config/codex-rate-proxy/config.ini
-chmod 600 ~/.config/codex-rate-proxy/config.ini
-vi ~/.config/codex-rate-proxy/config.ini
-```
+설치된 `config.ini`에서 API 주소와 사내 프록시 주소를 실제 값으로 수정합니다.
+API에 직접 연결하는 환경에서는 `[forward_proxy]`의 `http` 값을 비워 두세요.
+사용자 키와 개인 키 파일 경로는 공통 INI에 넣지 않습니다.
 
 ```ini
-[server]
-host = 127.0.0.1
-port = 8765
-
 [upstream]
 base_url = http://llm.example.com/v1
 timeout_seconds = 600
 max_request_body_bytes = 134217728
+
+[forward_proxy]
+http = http://proxy.example.com:8080
 
 [rate_limit]
 min_interval_seconds = 10
@@ -329,78 +124,35 @@ backoff_base_seconds = 5
 backoff_max_seconds = 60
 backoff_jitter_seconds = 1
 
-[forward_proxy]
-http = http://proxy.example.com:8080
+[launcher]
+codex_binary = codex
+provider = corp
+
+[lifecycle]
+idle_timeout_seconds = 1800
 ```
 
-Leave `http` empty when the upstream API is directly reachable.
-Do not commit the real `config.ini`, because it can contain internal addresses
-or proxy credentials.
+| 설정 | 의미 |
+| --- | --- |
+| `base_url` | 실제 API 주소. 예: `http://호스트/v1` |
+| `timeout_seconds` | API 요청 타임아웃(초) |
+| `max_request_body_bytes` | 요청 본문 최대 크기(기본 128 MiB) |
+| `http` | 사내 HTTP 프록시 주소. 환경변수 HTTP_PROXY는 사용하지 않음 |
+| `min_interval_seconds` | 요청 시작 사이의 최소 간격(초) |
+| `max_retries` | 429 응답 후 최대 재시도 횟수 |
+| `backoff_base_seconds` / `backoff_max_seconds` | 지수 백오프 시작값 / 상한(초). 더 긴 `Retry-After`는 우선 적용 |
+| `backoff_jitter_seconds` | 백오프에 추가하는 무작위 대기 범위(초) |
+| `codex_binary` | PATH상의 Codex 명령 또는 실행 파일 절대 경로 |
+| `provider` | Codex 설정에 정의한 provider 이름 |
+| `idle_timeout_seconds` | 세션과 요청이 모두 없는 프록시를 자동 종료하기까지의 시간(초) |
 
-## Run
+관리 모드에서는 포트를 자동 할당하므로 `[server] host/port`는 사용하지 않습니다.
+키가 달라도 같은 API 계정의 제한을 공유하는 경우에는 이 프록시들이 그 제한을 합산하지 않습니다.
+이 기능은 요청 간격과 429 대기를 제어하며, 정확한 TPM 제한 기능은 아닙니다.
 
-```bash
-~/.local/bin/codex-rate-proxy
-```
+### Codex 설정
 
-The default configuration path is
-`~/.config/codex-rate-proxy/config.ini`. To use a different file:
-
-```bash
-~/.local/bin/codex-rate-proxy --config /path/to/proxy.ini
-```
-
-To run the Python fallback instead:
-
-```bash
-python3 llm_rate_proxy.py --config /path/to/proxy.ini
-```
-
-To keep it running after logout with Bash:
-
-```bash
-nohup ~/.local/bin/codex-rate-proxy > "$HOME/.config/codex-rate-proxy/proxy.log" 2>&1 &
-echo $! > "$HOME/.config/codex-rate-proxy/proxy.pid"
-```
-
-With csh or tcsh, use `>>&` to append both standard output and standard error.
-`>!` safely replaces an existing PID file even when `noclobber` is enabled:
-
-```csh
-nohup ~/.local/bin/codex-rate-proxy >>& ~/.config/codex-rate-proxy/proxy.log &
-echo $! >! ~/.config/codex-rate-proxy/proxy.pid
-```
-
-After editing `config.ini`, reload it without interrupting the process.
-
-Bash:
-
-```bash
-kill -HUP "$(cat "$HOME/.config/codex-rate-proxy/proxy.pid")"
-```
-
-csh or tcsh:
-
-```csh
-kill -HUP `cat ~/.config/codex-rate-proxy/proxy.pid`
-```
-
-The upstream address, timeout, request-size limit, rate-limit policy, and
-forward proxy are applied to new requests. Existing requests and SSE streams
-continue with their original settings. Changes to `[server] host` or `port`
-require a restart. If the updated file is invalid, the proxy logs the error and
-keeps the last valid configuration.
-
-Health check:
-
-```bash
-curl http://127.0.0.1:8765/health
-```
-
-## Codex configuration
-
-Point the provider in `~/.codex/config.toml` at the local proxy and disable
-Codex-side retries so that this proxy owns the retry policy:
+`~/.codex/config.toml`에 사용할 모델과 provider를 정의합니다.
 
 ```toml
 model = "YOUR_MODEL"
@@ -408,7 +160,7 @@ model_provider = "corp"
 
 [model_providers.corp]
 name = "Corporate LLM"
-base_url = "http://127.0.0.1:8765/v1"
+base_url = "http://llm.example.com/v1"
 wire_api = "responses"
 env_key = "OPENAI_API_KEY"
 requires_openai_auth = false
@@ -417,26 +169,39 @@ stream_max_retries = 0
 supports_websockets = false
 ```
 
-Start a new Codex session after changing the configuration.
+`launch`는 실행하는 Codex에만 로컬 URL과 선택한 키, 재시도 설정을 전달합니다.
+공통 `config.toml`과 부모 셸의 환경변수는 수정하지 않습니다.
+위 API 주소를 직접 사용하는 `codex` 명령 대신 `codex-rate-proxy launch -u 이름`으로 실행하세요.
 
-## Default retry policy
+### 설정 반영 및 프록시 정리
 
-With the defaults, normal upstream request starts are at least 10 seconds
-apart. A 429 response is retried after approximately 5, 10, 20, 40, and 60
-seconds. If `Retry-After` requests a longer delay, that delay wins.
+INI를 저장하는 것만으로는 실행 중인 프록시에 반영되지 않습니다.
+`list`에서 PID를 확인하고 `kill -HUP PID`로 다시 읽게 하세요.
+유효한 설정은 새 요청부터 적용되고, 잘못된 설정이면 기존 값을 유지하며 로그에 오류를 남깁니다.
+API 주소를 변경했다면 `launch`를 다시 실행하여 새 프록시를 만드세요.
 
-The request JSON and response body are not modified. The proxy only controls
-when requests are sent and relays the final response.
+```sh
+codex-rate-proxy list
+codex-rate-proxy prune --dry-run
+codex-rate-proxy prune
+```
 
-## Security notes
+`list`와 `prune`은 현재 HOME의 모든 관리 프록시를 대상으로 합니다.
+`prune`은 활성 세션·요청이 없는 프록시만 종료합니다.
+Codex가 입력을 기다리거나 도구를 실행하는 동안에는 사용 중으로 간주합니다.
+평소에는 자동 정리에 맡기면 되며, 관리 모드는 별도 `nohup` 실행이 필요하지 않습니다.
 
-- Keep the default `127.0.0.1` listener unless remote access is intentional.
-- Do not put API keys or internal hostnames in this repository.
-- Prompts and response bodies are not written to the proxy log.
-- The Rust implementation intentionally supports only an HTTP upstream and an
-  optional HTTP forward proxy. It contains no TLS stack.
+같은 Linux 계정을 함께 쓰더라도 서로 다른 키는 별도 프록시를 사용합니다.
+프로젝트마다 INI를 복사하면 같은 키도 별도 프록시가 생성되므로 공통 INI 하나를 사용하세요.
 
-## License
+### 키 보관
 
-No license has been selected yet. Until a license is added, normal copyright
-rules apply even if the repository is public.
+등록된 키는 암호화하여 저장합니다. 복원이 필요하면 등록 파일과 마스터 키를 함께 안전하게 백업하세요.
+같은 Linux 계정을 공유하는 사람은 두 파일에 모두 접근할 수 있으므로 사용자 간 보안 격리는 제공하지 않습니다.
+키나 실제 내부 설정은 GitHub에 올리지 마세요.
+
+v0.4.0의 평문 등록 파일을 일괄 암호화하려면 업그레이드 후 한 번 실행합니다.
+
+```sh
+codex-rate-proxy encrypt-keys
+```
