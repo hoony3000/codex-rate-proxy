@@ -24,6 +24,18 @@ Codex sends several model requests in a short period of time.
 
 ## Launch Codex (Linux, Bash and csh/tcsh)
 
+**`-u`** is equivalent to `--user` for `launch`, `url` and `stop`:
+
+```sh
+codex-rate-proxy launch -u hoony
+codex-rate-proxy launch -u hoony -- resume --last
+codex-rate-proxy url -u hoony
+codex-rate-proxy stop -u hoony
+```
+
+The existing `--user` spelling remains supported. Use either spelling once;
+combining `-u` and `--user`, or mixing either with another key source, is rejected.
+
 The Rust `launch` command prepares or reuses a proxy and starts Codex for you.
 Keep one shared INI at `~/.config/codex-rate-proxy/config.ini`. Define your
 existing custom provider (default `corp`) and model in `~/.codex/config.toml`.
