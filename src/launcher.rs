@@ -448,7 +448,7 @@ pub fn dispatch() -> Result<Option<i32>> {
             }
             "--dry-run" => dry_run = true,
             "--replace" => replace = true,
-            "--user" => {
+            "--user" | "-u" => {
                 if user.is_some() { return Err("choose only one user".into()); }
                 i += 1;
                 user = Some(arguments.get(i).ok_or("--user requires a name")?);

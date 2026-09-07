@@ -435,7 +435,7 @@ idle_timeout_seconds = {idle}
         env = dict(self.env, MOCK_REPORT=str(report), MOCK_RELEASE=str(release))
         env.pop("OPENAI_API_KEY")
         args = ["exec", "--", "a prompt with spaces; $literal"]
-        self.cli("launch", "--config", str(self.config), "--user", "alice", "--", *args, env=env)
+        self.cli("launch", "--config", str(self.config), "-u", "alice", "--", *args, env=env)
         info = json.loads(report.read_text())
         self.assertEqual(info["args"][-len(args):], args)
         self.assertTrue(info["key_ok"])
