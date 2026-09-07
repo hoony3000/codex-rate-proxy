@@ -456,6 +456,8 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
                 println!(
                     "codex-rate-proxy\n\nUsage: codex-rate-proxy [--config PATH]\n\
                      codex-rate-proxy register NAME [--key-file PATH | --key-env NAME | --key-stdin | --ask-key] [--replace]\n\
+                     codex-rate-proxy unregister NAME\n\
+                     codex-rate-proxy encrypt-keys\n\
                      codex-rate-proxy launch|url|stop [--config PATH] [--user NAME | --key-file PATH | --key-env NAME | --key-stdin | --ask-key]\n\
                      codex-rate-proxy launch [OPTIONS] -- [CODEX ARGS]\n\
                      codex-rate-proxy list\ncodex-rate-proxy prune [--dry-run]\n\n\

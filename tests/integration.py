@@ -283,10 +283,13 @@ idle_timeout_seconds = {idle}
         path = self.home / ".config/codex-rate-proxy/users/alice.key"
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
+        encrypted = path.read_bytes()
+        self.assertTrue(encrypted.startswith(b"CRPKEY\x00\x01"))
+        self.assertNotIn(KEY_A.encode(), encrypted)
         expected = self.url()
         self.assertEqual(self.cli("url", "--config", str(self.config), "--user", "alice", env=env).stdout.strip(), expected)
         self.assertNotEqual(self.cli("register", "alice", "--key-stdin", input=KEY_B, check=False).returncode, 0)
-        self.assertEqual(path.read_text().strip(), KEY_A)
+        self.assertEqual(path.read_bytes(), encrypted)
         self.cli("register", "alice", "--replace", "--key-stdin", input=KEY_B)
         other = self.cli("url", "--config", str(self.config), "--user", "alice", env=env).stdout.strip()
         self.assertNotEqual(other, expected)
@@ -301,6 +304,77 @@ idle_timeout_seconds = {idle}
         target.write_text(KEY_A)
         path.symlink_to(target)
         self.assertNotEqual(self.cli("url", "--config", str(self.config), "--user", "alice", check=False).returncode, 0)
+
+    def test_legacy_credentials_migrate_on_use_and_in_bulk(self):
+        users = self.home / ".config/codex-rate-proxy/users"
+        users.mkdir(parents=True, mode=0o700)
+        for name, key in [("alice", KEY_A), ("bob", KEY_B)]:
+            path = users / (name + ".key")
+            path.write_text(key + "\n")
+            path.chmod(0o600)
+        url = self.cli("url", "--config", str(self.config), "--user", "alice").stdout.strip()
+        self.assertEqual(url, self.url())
+        self.assertTrue((users / "alice.key").read_bytes().startswith(b"CRPKEY\x00\x01"))
+        self.cli("encrypt-keys")
+        self.cli("encrypt-keys")
+        for path in users.glob("*.key"):
+            self.assertNotIn(KEY_A.encode(), path.read_bytes())
+            self.assertNotIn(KEY_B.encode(), path.read_bytes())
+        master = self.home / ".local/share/codex-rate-proxy/master.key"
+        self.assertEqual(master.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(len(master.read_bytes()), 32)
+        self.assertEqual(master.parent.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(list(users.glob("*.tmp")))
+
+    def test_encrypted_credentials_reject_tamper_wrong_name_and_missing_master(self):
+        self.cli("register", "alice", "--key-stdin", input=KEY_A)
+        users = self.home / ".config/codex-rate-proxy/users"
+        path = users / "alice.key"
+        original = path.read_bytes()
+        path.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+        result = self.cli("url", "--config", str(self.config), "--user", "alice", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("authentication failed", result.stderr)
+        self.assertFalse(self.records())
+        path.write_bytes(original)
+        copied = users / "bob.key"
+        copied.write_bytes(original)
+        copied.chmod(0o600)
+        self.assertNotEqual(self.cli("url", "--config", str(self.config), "--user", "bob", check=False).returncode, 0)
+        self.cli("unregister", "bob")
+        master = self.home / ".local/share/codex-rate-proxy/master.key"
+        saved_master = master.read_bytes()
+        master.chmod(0o644)
+        self.assertNotEqual(self.cli("url", "--config", str(self.config), "--user", "alice", check=False).returncode, 0)
+        master.unlink()
+        self.assertNotEqual(self.cli("url", "--config", str(self.config), "--user", "alice", check=False).returncode, 0)
+        self.assertNotEqual(self.cli("register", "bob", "--key-stdin", input=KEY_B, check=False).returncode, 0)
+        self.assertFalse(master.exists())
+        self.assertEqual(path.read_bytes(), original)
+        master.write_bytes(saved_master)
+        master.chmod(0o600)
+        self.assertEqual(self.cli("url", "--config", str(self.config), "--user", "alice").stdout.strip(), self.url())
+
+    def test_unregister_only_removes_selected_profile(self):
+        for name, key in [("alice", KEY_A), ("bob", KEY_B)]:
+            self.cli("register", name, "--key-stdin", input=key)
+        url = self.cli("url", "--config", str(self.config), "--user", "alice").stdout.strip()
+        self.cli("unregister", "alice")
+        self.cli("unregister", "alice")
+        users = self.home / ".config/codex-rate-proxy/users"
+        self.assertFalse((users / "alice.key").exists())
+        self.assertTrue((users / "bob.key").exists())
+        self.assertNotEqual(self.cli("url", "--config", str(self.config), "--user", "alice", check=False).returncode, 0)
+        self.assertEqual(self.request(url).read(), b'{"hello":"world"}')
+        self.cli("url", "--config", str(self.config), "--user", "bob")
+        for args in [("unregister", "../escape"), ("unregister",), ("unregister", "bob", "--replace")]:
+            self.assertNotEqual(self.cli(*args, check=False).returncode, 0)
+
+    def test_concurrent_registrations_share_one_master(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda n: self.cli("register", "user" + str(n), "--key-stdin", input=KEY_A), range(4)))
+        urls = [self.cli("url", "--config", str(self.config), "--user", "user" + str(n)).stdout.strip() for n in range(4)]
+        self.assertEqual(len(set(urls)), 1)
 
     def test_failed_new_launch_cleans_up_but_reused_proxy_survives(self):
         self.mock.write_text("#!/bin/sh\nexit 2\n")
