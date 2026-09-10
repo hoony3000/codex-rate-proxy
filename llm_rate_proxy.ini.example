@@ -2,6 +2,13 @@
 host = 127.0.0.1
 port = 8765
 
+# Start one `codex-rate-proxy gateway` for this shared URL.
+# Existing INI files without this section keep the legacy per-key URL mode.
+[gateway]
+enabled = true
+max_inflight = 128
+max_workers = 32
+
 [upstream]
 base_url = http://llm.example.com/v1
 timeout_seconds = 600

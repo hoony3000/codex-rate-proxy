@@ -28,6 +28,7 @@ const DEFAULT_CONFIG_NAME: &str = "config.ini";
 
 #[cfg(target_os = "linux")]
 mod launcher;
+mod gateway;
 
 #[derive(Clone, Debug)]
 struct Settings {
@@ -45,6 +46,9 @@ struct Settings {
     idle_timeout: Duration,
     codex_binary: String,
     provider: String,
+    gateway_enabled: bool,
+    gateway_max_inflight: usize,
+    gateway_max_workers: usize,
 }
 
 #[derive(Clone)]
@@ -75,6 +79,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn serve() -> Result<(), Box<dyn Error>> {
+    if env::args().nth(1).as_deref() == Some("gateway") {
+        return gateway::serve(fs::canonicalize(parse_args()?)?).await;
+    }
     let is_managed = env::args().nth(1).as_deref() == Some("__managed");
     let config_path = parse_args()?;
     let managed = if is_managed { Some(launcher::bootstrap(&config_path)?) } else { None };
@@ -445,7 +452,7 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
     let mut config_path = None;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "__managed" => {},
+            "__managed" | "gateway" => {},
             "-c" | "--config" => {
                 let value = arguments
                     .next()
@@ -455,6 +462,7 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
             "-h" | "--help" => {
                 println!(
                     "codex-rate-proxy\n\nUsage: codex-rate-proxy [--config PATH]\n\
+                     codex-rate-proxy gateway [--config PATH]\n\
                      codex-rate-proxy launch -u NAME -- [CODEX ARGS]\n\
                      -u NAME is an alias for --user NAME.\n\
                      codex-rate-proxy register NAME [--key-file PATH | --key-env NAME | --key-stdin | --ask-key] [--replace]\n\
@@ -515,10 +523,16 @@ fn load_settings(path: &Path) -> Result<Settings, Box<dyn Error>> {
         idle_timeout: duration_value(&ini, "lifecycle", "idle_timeout_seconds", "1800")?,
         codex_binary: get(&ini, "launcher", "codex_binary", "codex"),
         provider: get(&ini, "launcher", "provider", "corp"),
+        gateway_enabled: parse_value(&ini, "gateway", "enabled", "false")?,
+        gateway_max_inflight: parse_value(&ini, "gateway", "max_inflight", "128")?,
+        gateway_max_workers: parse_value(&ini, "gateway", "max_workers", "32")?,
     };
 
     if settings.listen_host.is_empty() {
         return Err("[server] host must not be empty".into());
+    }
+    if settings.gateway_max_inflight == 0 || settings.gateway_max_workers == 0 {
+        return Err("gateway limits must be positive".into());
     }
     if settings.provider.is_empty() || !settings.provider.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
         return Err("[launcher] provider must contain only letters, digits, underscore or hyphen".into());

@@ -225,7 +225,7 @@ fn instance_dir(id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-struct Lease { path: PathBuf, file: File }
+pub(crate) struct Lease { path: PathBuf, file: File }
 
 impl Lease {
     fn new(dir: &Path) -> Result<Self> {
@@ -370,6 +370,41 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+// A lease spans gateway forwarding, including waiting, streaming and cancellation.
+pub(crate) fn gateway_worker(config: &Path, key: &str, max_workers: usize) -> Result<(String, Lease)> {
+    let (r, lease, _) = gateway_worker_inner(config, key, max_workers)?;
+    Ok((r.url, lease))
+}
+
+fn gateway_worker_inner(config: &Path, key: &str, max_workers: usize)
+    -> Result<(Record, Lease, Option<std::sync::mpsc::Receiver<()>>)> {
+    validate_key(key)?;
+    let settings = load_settings(config)?;
+    let id = identity(key, &settings.upstream_base_url, config);
+    let dir = instance_dir(&id)?;
+    let start = private_file(&dir.join("start.lock"), false)?;
+    lock(&start, false)?;
+    let lease = Lease::new(&dir)?;
+    if let Ok(r) = record(&dir) {
+        if r.identity == id && control(&dir, &r, "status").is_ok_and(|s| !s.stopping) {
+            return Ok((r, lease, None));
+        }
+    }
+    // Serialize allocation only; requests to existing workers do not take this lock.
+    let allocation = private_file(&root()?.join("gateway-allocation.lock"), false)?;
+    lock(&allocation, false)?;
+    let mut running = 0;
+    for entry in fs::read_dir(root()?)? {
+        let path = entry?.path();
+        if !fs::symlink_metadata(&path)?.is_dir() { continue; }
+        let run = private_file(&path.join("run.lock"), false)?;
+        if !lock(&run, true)? { running += 1; }
+    }
+    if running >= max_workers { return Err("gateway worker capacity reached".into()); }
+    let (r, created) = ensure_proxy(config, key, &dir, &id)?;
+    Ok((r, lease, created))
+}
+
 fn cleanup_failed_launch(dir: &Path, r: &Record, created: Option<std::sync::mpsc::Receiver<()>>) {
     let Some(reaped) = created else { return; };
     let result = (|| -> Result<()> {
@@ -475,6 +510,10 @@ pub fn dispatch() -> Result<Option<i32>> {
     let config = fs::canonicalize(config)?;
     let settings = load_settings(&config)?;
     let key = match user { Some(name) => credentials::registered_key(name)?, None => read_key(source)? };
+    // Fail before creating a worker if the administrator's shared gateway is unavailable.
+    let shared_url = if settings.gateway_enabled && operation != "stop" {
+        Some(super::gateway::check(&settings, &config)?)
+    } else { None };
     let id = identity(&key, &settings.upstream_base_url, &config);
     let dir = instance_dir(&id)?;
     let start_lock = private_file(&dir.join("start.lock"), false)?;
@@ -493,16 +532,25 @@ pub fn dispatch() -> Result<Option<i32>> {
     // Register a kernel-backed lease before checking or creating the daemon.
     // The control server may already have begun stopping; ensure_proxy handles that case.
     let lease = Lease::new(&dir)?;
-    let (r, created) = ensure_proxy(&config, &key, &dir, &id)?;
-    drop(start_lock);
-    if operation == "url" { println!("{}", r.url); return Ok(Some(0)); }
-    eprintln!("Proxy: {}", r.url);
+    // Shared mode uses the same bounded worker allocation as incoming HTTP requests.
+    let (r, created) = if shared_url.is_some() {
+        drop(start_lock);
+        let (r, _guard, created) = gateway_worker_inner(&config, &key, settings.gateway_max_workers)?;
+        (r, created)
+    } else {
+        let result = ensure_proxy(&config, &key, &dir, &id)?;
+        drop(start_lock);
+        result
+    };
+    let url = shared_url.as_deref().unwrap_or(&r.url);
+    if operation == "url" { println!("{url}"); return Ok(Some(0)); }
+    eprintln!("Proxy: {url}");
     let mut command = Command::new(&settings.codex_binary);
     if source.is_some_and(|(kind, _)| kind == "stdin") {
         if let Ok(tty) = File::open("/dev/tty") { command.stdin(Stdio::from(tty)); }
     }
     command.arg("-c").arg(format!("model_provider={}", serde_json::to_string(&settings.provider)?))
-        .arg("-c").arg(format!("model_providers.{}.base_url={}", settings.provider, serde_json::to_string(&r.url)?))
+        .arg("-c").arg(format!("model_providers.{}.base_url={}", settings.provider, serde_json::to_string(url)?))
         .arg("-c").arg(format!("model_providers.{}.env_key=\"CODEX_RATE_PROXY_API_KEY\"", settings.provider))
         .arg("-c").arg(format!("model_providers.{}.requires_openai_auth=false", settings.provider))
         .arg("-c").arg(format!("model_providers.{}.request_max_retries=0", settings.provider))
