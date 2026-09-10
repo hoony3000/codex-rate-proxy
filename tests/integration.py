@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,133 @@ idle_timeout_seconds = {idle}
 
     def records(self):
         return list(self.home.glob(".local/state/codex-rate-proxy/*/record.json"))
+
+    def start_gateway(self, max_workers=32, max_inflight=128):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        with self.config.open("a") as f:
+            f.write(f"\n[server]\nhost = 127.0.0.1\nport = {port}\n"
+                    f"[gateway]\nenabled = true\nmax_workers = {max_workers}\nmax_inflight = {max_inflight}\n")
+        log = (self.home / "gateway.log").open("w")
+        process = subprocess.Popen([BIN, "gateway", "--config", str(self.config)],
+            env=self.env, stdout=log, stderr=log)
+        log.close()
+        self.processes.append(process)
+        self.gateway_url = f"http://127.0.0.1:{port}/v1"
+        def healthy():
+            try:
+                opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                with opener.open(f"http://127.0.0.1:{port}/health", timeout=1) as r:
+                    return json.load(r).get("gateway") == "codex-rate-proxy/1"
+            except OSError:
+                return False
+        wait_until(healthy)
+        return process
+
+    def test_gateway_common_url_concurrency_and_key_routing(self):
+        self.start_gateway()
+        def send(key):
+            with self.request(self.gateway_url, key=key, data=key.encode()) as r:
+                return r.read()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            keys = [KEY_A, KEY_B] * 4
+            self.assertEqual(list(pool.map(send, keys)), [k.encode() for k in keys])
+        records = [json.loads(p.read_text()) for p in self.records()]
+        self.assertEqual(len(records), 2)
+        self.assertEqual(len({r['pid'] for r in records}), 2)
+        self.assertEqual(self.url(KEY_A), self.gateway_url)
+        self.assertEqual(self.url(KEY_B), self.gateway_url)
+        # No key may be forwarded to the other key's worker.
+        for r in records:
+            statuses = []
+            for key in (KEY_A, KEY_B):
+                try:
+                    with self.request(r['url'], key=key) as response:
+                        statuses.append(response.status)
+                except urllib.error.HTTPError as e:
+                    statuses.append(e.code)
+            self.assertEqual(sorted(statuses), [200, 401])
+        duplicate = self.cli('gateway', '--config', str(self.config), check=False)
+        self.assertNotEqual(duplicate.returncode, 0)
+
+    def test_gateway_cooldown_isolated_and_stream_protected(self):
+        self.write_config(interval=0, retries=2)
+        self.start_gateway()
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            def limited():
+                try:
+                    self.request(self.gateway_url, path='/limited')
+                except urllib.error.HTTPError as e:
+                    return e.code
+            pending = pool.submit(limited)
+            wait_until(lambda: any('returned 429' in p.read_text()
+                for p in self.home.glob('.local/state/codex-rate-proxy/*/proxy.log')))
+            with self.request(self.gateway_url, key=KEY_B) as response:
+                self.assertEqual(response.status, 200)
+            self.assertFalse(pending.done())
+            self.assertEqual(pending.result(), 429)
+        with self.request(self.gateway_url, path='/stream') as response:
+            self.assertEqual(response.readline(), b'data: {"part":1}\n')
+            self.cli('prune')
+            self.assertTrue(any('active' in line for line in self.cli('list').stdout.splitlines()))
+            STREAM_RELEASE.set()
+            self.assertIn(b'data: [DONE]', response.read())
+
+    def test_gateway_capacity_auth_and_worker_recreation(self):
+        self.start_gateway(max_workers=1)
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            opener.open(urllib.request.Request(self.gateway_url + '/responses', data=b'{}'))
+        self.assertEqual(error.exception.code, 401)
+        self.assertEqual(self.records(), [])
+        with self.request(self.gateway_url) as r:
+            r.read()
+        first = json.loads(self.records()[0].read_text())
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request(self.gateway_url, key=KEY_B)
+        self.assertEqual(error.exception.code, 503)
+        self.cli('prune')
+        wait_until(lambda: not self.records())
+        with self.request(self.gateway_url, key=KEY_B) as r:
+            r.read()
+        self.assertNotEqual(json.loads(self.records()[0].read_text())['pid'], first['pid'])
+
+    def test_gateway_launch_arguments_and_failed_launch_cleanup(self):
+        self.start_gateway()
+        report = self.home / 'report'
+        release = self.home / 'release'
+        release.touch()
+        self.cli('launch', '--config', str(self.config), '--', 'resume', '--last',
+            env=dict(self.env, MOCK_REPORT=str(report), MOCK_RELEASE=str(release)))
+        info = json.loads(report.read_text())
+        self.assertTrue(info['key_ok'])
+        self.assertEqual(info['args'][-2:], ['resume', '--last'])
+        self.assertTrue(any(self.gateway_url in arg for arg in info['args']))
+        self.cli('prune')
+        wait_until(lambda: not self.records())
+        self.mock.write_text('#!/bin/sh\nexit 1\n')
+        result = self.cli('launch', '--config', str(self.config), check=False)
+        self.assertEqual(result.returncode, 1)
+        wait_until(lambda: not self.records())
+
+    def test_gateway_inflight_limit_and_unavailable_launcher(self):
+        gateway = self.start_gateway(max_inflight=1)
+        with self.request(self.gateway_url, path='/stream') as response:
+            response.readline()
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(self.gateway_url, key=KEY_B)
+            self.assertEqual(error.exception.code, 503)
+            STREAM_RELEASE.set()
+            response.read()
+        gateway.terminate()
+        gateway.wait(timeout=10)
+        self.cli('prune')
+        wait_until(lambda: not self.records())
+        failed = self.cli('launch', '--config', str(self.config), check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('shared gateway unavailable', failed.stderr)
+        self.assertEqual(self.records(), [])
 
     def request(self, url, key=KEY_A, path="/responses", data=b'{"hello":"world"}'):
         request = urllib.request.Request(url + path, data=data,
