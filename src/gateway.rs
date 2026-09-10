@@ -107,8 +107,9 @@ async fn forward(State(state): State<Gateway>, request: Request) -> Response<Bod
     };
     let config = state.config.clone();
     let max_workers = state.settings.gateway_max_workers;
+    let upstream = state.settings.upstream_base_url.clone();
     let worker = tokio::task::spawn_blocking(move || {
-        launcher::gateway_worker(&config, &key, max_workers).map_err(|_| ())
+        launcher::gateway_worker(&config, &key, max_workers, &upstream).map_err(|_| ())
     }).await;
     let (url, lease) = match worker {
         Ok(Ok(worker)) => worker,

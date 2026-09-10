@@ -27,9 +27,13 @@ codex-rate-proxy launch -u hoony -- --model YOUR_MODEL
 `hoony` 대신 자신의 등록 이름을 사용하세요. 이름은 영문자·숫자·밑줄·하이픈 1~64자입니다.
 `-u`와 `--user`는 동일합니다. 매번 자신의 이름을 지정해야 합니다.
 
-키와 API 주소, 공통 설정 파일 경로가 같으면 기존 프록시를 재사용하고,
-없으면 자동으로 포트를 할당합니다. Codex에 로컬 URL도 자동 전달하므로
-사용자가 포트나 `base_url`을 따로 설정할 필요가 없습니다.
+공통 게이트웨이를 사용하면 모든 사용자의 URL은 `http://127.0.0.1:8765/v1`로 같습니다.
+게이트웨이가 요청의 Bearer API 키를 확인하여 키별 worker 프로세스로 전달합니다.
+같은 키는 worker를 재사용하고, 다른 키는 요청 간격과 429 대기를 독립적으로 관리합니다.
+`launch`는 Codex에 공통 URL과 등록된 키를 자동 전달합니다.
+
+다른 호환 프로그램에도 같은 `base_url`과 각자의 API 키를 설정하세요.
+해당 프로그램은 같은 리모트 서버에서 실행되어야 하며, 사내 API가 지원하는 요청 형식을 사용해야 합니다.
 
 ### 키 입력 방법 및 변경
 
@@ -109,6 +113,15 @@ API에 직접 연결하는 환경에서는 `[forward_proxy]`의 `http` 값을 �
 사용자 키와 개인 키 파일 경로는 공통 INI에 넣지 않습니다.
 
 ```ini
+[server]
+host = 127.0.0.1
+port = 8765
+
+[gateway]
+enabled = true
+max_inflight = 128
+max_workers = 32
+
 [upstream]
 base_url = http://llm.example.com/v1
 timeout_seconds = 600
@@ -134,6 +147,9 @@ idle_timeout_seconds = 1800
 
 | 설정 | 의미 |
 | --- | --- |
+| `enabled` | `launch`와 `url`이 공통 게이트웨이를 사용하도록 설정 |
+| `max_inflight` | 게이트웨이가 동시에 전달할 요청 수(스트리밍 포함). 초과 시 503 |
+| `max_workers` | 새 worker 생성 시 현재 HOME의 실행 중인 관리 worker 수 상한. 초과 시 503 |
 | `base_url` | 실제 API 주소. 예: `http://호스트/v1` |
 | `timeout_seconds` | API 요청 타임아웃(초) |
 | `max_request_body_bytes` | 요청 본문 최대 크기(기본 128 MiB) |
@@ -146,9 +162,38 @@ idle_timeout_seconds = 1800
 | `provider` | Codex 설정에 정의한 provider 이름 |
 | `idle_timeout_seconds` | 세션과 요청이 모두 없는 프록시를 자동 종료하기까지의 시간(초) |
 
-관리 모드에서는 포트를 자동 할당하므로 `[server] host/port`는 사용하지 않습니다.
+게이트웨이는 `[server] host/port`로 고정 주소를 사용합니다. 루프백 주소와 0이 아닌 포트만 허용합니다.
+키별 worker의 내부 포트는 자동 할당하며 사용자가 설정할 필요가 없습니다.
+기존 INI에 `[gateway]`가 없거나 `enabled = false`이면 `launch/url`은 이전처럼 키별 URL을 사용합니다.
+기존 설치를 전환할 때는 위 `[gateway]` 섹션을 직접 추가하세요(설치 스크립트는 기존 INI를 보존합니다).
 키가 달라도 같은 API 계정의 제한을 공유하는 경우에는 이 프록시들이 그 제한을 합산하지 않습니다.
 이 기능은 요청 간격과 429 대기를 제어하며, 정확한 TPM 제한 기능은 아닙니다.
+
+### 공통 게이트웨이 시작
+
+관리자가 공유 Linux 계정에서 한 번 실행합니다. `enabled = true`만으로 게이트웨이가 자동 시작되지는 않습니다.
+
+```sh
+codex-rate-proxy gateway
+```
+
+SSH 로그아웃 후에도 유지하려면 사용하는 셸에 맞게 실행하세요.
+
+```bash
+# Bash
+nohup ~/.local/bin/codex-rate-proxy gateway > ~/.config/codex-rate-proxy/gateway.log 2>&1 &
+echo $! > ~/.config/codex-rate-proxy/gateway.pid
+```
+
+```csh
+# csh/tcsh
+nohup ~/.local/bin/codex-rate-proxy gateway >>& ~/.config/codex-rate-proxy/gateway.log &
+echo $! >! ~/.config/codex-rate-proxy/gateway.pid
+```
+
+같은 포트로 두 번째 게이트웨이를 실행하면 오류로 종료합니다.
+게이트웨이가 없거나 다른 INI로 실행 중이면 `launch/url`은 worker를 생성하기 전에 오류를 표시합니다.
+게이트웨이 로그는 위 `gateway.log`, 키별 처리 로그는 상태 디렉터리의 각 `proxy.log`에 저장됩니다.
 
 ### Codex 설정
 
@@ -175,10 +220,13 @@ supports_websockets = false
 
 ### 설정 반영 및 프록시 정리
 
-INI를 저장하는 것만으로는 실행 중인 프록시에 반영되지 않습니다.
-`list`에서 PID를 확인하고 `kill -HUP PID`로 다시 읽게 하세요.
+INI를 저장하는 것만으로는 실행 중인 프로세스에 반영되지 않습니다.
+키별 worker는 `list`에서 PID를 확인하고 `kill -HUP PID`로 다시 읽게 하세요.
 유효한 설정은 새 요청부터 적용되고, 잘못된 설정이면 기존 값을 유지하며 로그에 오류를 남깁니다.
-API 주소를 변경했다면 `launch`를 다시 실행하여 새 프록시를 만드세요.
+게이트웨이 자체의 설정은 시작 시 읽으므로 반영하려면 종료 후 다시 시작해야 합니다.
+게이트웨이 재시작은 모든 사용자의 연결에 영향을 주므로 진행 중인 요청이 없을 때 하세요.
+API 주소를 변경했다면 게이트웨이를 재시작하고 Codex도 다시 실행하세요.
+기존 worker는 사용하지 않게 된 뒤 정리됩니다.
 
 ```sh
 codex-rate-proxy list
@@ -189,7 +237,9 @@ codex-rate-proxy prune
 `list`와 `prune`은 현재 HOME의 모든 관리 프록시를 대상으로 합니다.
 `prune`은 활성 세션·요청이 없는 프록시만 종료합니다.
 Codex가 입력을 기다리거나 도구를 실행하는 동안에는 사용 중으로 간주합니다.
-평소에는 자동 정리에 맡기면 되며, 관리 모드는 별도 `nohup` 실행이 필요하지 않습니다.
+평소 worker 정리는 자동 정리에 맡기면 됩니다. `prune`은 공통 게이트웨이를 종료하지 않습니다.
+게이트웨이를 종료하려면 관리자가 확인한 PID에 `kill -TERM PID`를 보내세요.
+worker는 독립 프로세스이므로 게이트웨이 종료 후에도 남았다가 유휴 제한 시간에 따라 정리됩니다.
 
 같은 Linux 계정을 함께 쓰더라도 서로 다른 키는 별도 프록시를 사용합니다.
 프로젝트마다 INI를 복사하면 같은 키도 별도 프록시가 생성되므로 공통 INI 하나를 사용하세요.

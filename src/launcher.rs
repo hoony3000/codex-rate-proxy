@@ -371,7 +371,10 @@ fn validate_key(key: &str) -> Result<()> {
 }
 
 // A lease spans gateway forwarding, including waiting, streaming and cancellation.
-pub(crate) fn gateway_worker(config: &Path, key: &str, max_workers: usize) -> Result<(String, Lease)> {
+pub(crate) fn gateway_worker(config: &Path, key: &str, max_workers: usize, upstream: &str) -> Result<(String, Lease)> {
+    if load_settings(config)?.upstream_base_url != upstream {
+        return Err("upstream changed; restart shared gateway".into());
+    }
     let (r, lease, _) = gateway_worker_inner(config, key, max_workers)?;
     Ok((r.url, lease))
 }

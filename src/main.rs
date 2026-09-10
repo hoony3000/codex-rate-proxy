@@ -531,8 +531,9 @@ fn load_settings(path: &Path) -> Result<Settings, Box<dyn Error>> {
     if settings.listen_host.is_empty() {
         return Err("[server] host must not be empty".into());
     }
-    if settings.gateway_max_inflight == 0 || settings.gateway_max_workers == 0 {
-        return Err("gateway limits must be positive".into());
+    if settings.gateway_max_inflight == 0 || settings.gateway_max_workers == 0
+        || settings.gateway_max_inflight > tokio::sync::Semaphore::MAX_PERMITS {
+        return Err("gateway limits must be positive and max_inflight within semaphore capacity".into());
     }
     if settings.provider.is_empty() || !settings.provider.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
         return Err("[launcher] provider must contain only letters, digits, underscore or hyphen".into());

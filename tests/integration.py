@@ -131,13 +131,13 @@ idle_timeout_seconds = {idle}
     def records(self):
         return list(self.home.glob(".local/state/codex-rate-proxy/*/record.json"))
 
-    def start_gateway(self, max_workers=32):
+    def start_gateway(self, max_workers=32, max_inflight=128):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
         with self.config.open("a") as f:
             f.write(f"\n[server]\nhost = 127.0.0.1\nport = {port}\n"
-                    f"[gateway]\nenabled = true\nmax_workers = {max_workers}\n")
+                    f"[gateway]\nenabled = true\nmax_workers = {max_workers}\nmax_inflight = {max_inflight}\n")
         log = (self.home / "gateway.log").open("w")
         process = subprocess.Popen([BIN, "gateway", "--config", str(self.config)],
             env=self.env, stdout=log, stderr=log)
@@ -239,6 +239,24 @@ idle_timeout_seconds = {idle}
         result = self.cli('launch', '--config', str(self.config), check=False)
         self.assertEqual(result.returncode, 1)
         wait_until(lambda: not self.records())
+
+    def test_gateway_inflight_limit_and_unavailable_launcher(self):
+        gateway = self.start_gateway(max_inflight=1)
+        with self.request(self.gateway_url, path='/stream') as response:
+            response.readline()
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(self.gateway_url, key=KEY_B)
+            self.assertEqual(error.exception.code, 503)
+            STREAM_RELEASE.set()
+            response.read()
+        gateway.terminate()
+        gateway.wait(timeout=10)
+        self.cli('prune')
+        wait_until(lambda: not self.records())
+        failed = self.cli('launch', '--config', str(self.config), check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn('shared gateway unavailable', failed.stderr)
+        self.assertEqual(self.records(), [])
 
     def request(self, url, key=KEY_A, path="/responses", data=b'{"hello":"world"}'):
         request = urllib.request.Request(url + path, data=data,
