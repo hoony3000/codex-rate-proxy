@@ -463,6 +463,7 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
                 println!(
                     "codex-rate-proxy\n\nUsage: codex-rate-proxy [--config PATH]\n\
                      codex-rate-proxy gateway [--config PATH]\n\
+                     codex-rate-proxy env -u NAME --shell bash|csh|tcsh [--var NAME]\n\
                      codex-rate-proxy launch -u NAME -- [CODEX ARGS]\n\
                      -u NAME is an alias for --user NAME.\n\
                      codex-rate-proxy register NAME [--key-file PATH | --key-env NAME | --key-stdin | --ask-key] [--replace]\n\
