@@ -7,6 +7,7 @@ from pathlib import Path
 import signal
 import socket
 import shutil
+import pty
 import subprocess
 import sys
 import tempfile
@@ -170,6 +171,21 @@ idle_timeout_seconds = {idle}
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(result.stdout, '')
             self.assertNotIn(KEY_A, result.stderr)
+        master, slave = pty.openpty()
+        try:
+            result = subprocess.run([BIN, 'env', '-u', 'alice', '--shell', 'bash'],
+                env=self.env, stdout=slave, stderr=subprocess.PIPE, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b'refusing to print', result.stderr)
+            self.assertNotIn(KEY_A.encode(), result.stderr)
+        finally:
+            os.close(master)
+            os.close(slave)
+        profile = self.home / '.config/codex-rate-proxy/users/alice.key'
+        profile.write_bytes(b'CRPKEY\x00\x01broken')
+        result = self.cli('env', '-u', 'alice', '--shell', 'bash', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
 
     def start_gateway(self, max_workers=32, max_inflight=128):
         with socket.socket() as s:
