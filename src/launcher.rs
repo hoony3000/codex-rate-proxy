@@ -14,6 +14,7 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 mod credentials;
+mod env_export;
 
 #[derive(Serialize, Deserialize)]
 struct Bootstrap {
@@ -447,6 +448,10 @@ fn read_key(source: Option<(&str, &str)>) -> Result<String> {
 pub fn dispatch() -> Result<Option<i32>> {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let operation = arguments.first().map(String::as_str).unwrap_or("");
+    if operation == "env" {
+        env_export::run(&arguments[1..])?;
+        return Ok(Some(0));
+    }
     if !matches!(operation, "launch" | "url" | "list" | "stop" | "prune" | "register" | "unregister" | "encrypt-keys") { return Ok(None); }
     if operation == "unregister" {
         if arguments.len() != 2 { return Err("usage: codex-rate-proxy unregister NAME".into()); }

@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import signal
 import socket
+import shutil
+import pty
 import subprocess
 import sys
 import tempfile
@@ -130,6 +132,60 @@ idle_timeout_seconds = {idle}
 
     def records(self):
         return list(self.home.glob(".local/state/codex-rate-proxy/*/record.json"))
+
+    def test_env_export_evaluates_in_real_shells_without_executing_key(self):
+        # Printable punctuation covers quotes, history expansion, substitutions and globbing.
+        key = ''.join(chr(i) for i in range(33, 127)) + '$(touch${IFS}INJECTED)`touch${IFS}INJECTED`'
+        self.cli('register', 'alice', '--key-stdin', input=key)
+        self.config.unlink()  # Export requires neither INI, gateway nor a Codex installation.
+        verify = self.home / 'verify.py'
+        verify.write_text("import os,sys\nsys.exit(0 if os.environ.get('EXPORTED_KEY') == os.environ['EXPECTED_KEY'] else 1)\n")
+        for shell in ('bash', 'csh', 'tcsh'):
+            with self.subTest(shell=shell):
+                executable = shutil.which(shell)
+                self.assertIsNotNone(executable, 'CI must install the supported shells')
+                export = f'{BIN} env -u alice --shell {shell} --var EXPORTED_KEY'
+                evaluation = f'eval "$( {export} )"' if shell == 'bash' else f'eval `{export}`'
+                script = evaluation + f'\n{sys.executable} {verify}\n'
+                result = subprocess.run([executable, '-f' if shell != 'bash' else '--noprofile', '-c', script],
+                    env=dict(self.env, EXPECTED_KEY=key), cwd=self.home, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, 'shell evaluation failed')
+                self.assertEqual(result.stdout, b'')
+                self.assertEqual(result.stderr, b'')
+                self.assertFalse((self.home / 'INJECTED').exists())
+        self.assertFalse(self.records())
+
+    def test_env_export_defaults_and_invalid_arguments_are_secret_free(self):
+        self.cli('register', 'alice', '--key-stdin', input=KEY_A)
+        result = self.cli('env', '--user', 'alice', '--shell', 'bash')
+        self.assertTrue(result.stdout.startswith('export OPENAI_API_KEY='))
+        self.assertEqual(result.stderr, '')
+        cases = [[], ['-u', 'alice'], ['--shell', 'bash'],
+            ['-u', 'alice', '--shell', 'fish'],
+            ['-u', 'alice', '--shell', 'bash', '--var', 'X;touch'],
+            ['-u', 'alice', '--shell', 'bash', '--var', '1KEY'],
+            ['-u', 'alice', '--shell', 'bash', '-u', 'alice'],
+            ['-u', 'missing', '--shell', 'bash']]
+        for args in cases:
+            result = self.cli('env', *args, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, '')
+            self.assertNotIn(KEY_A, result.stderr)
+        master, slave = pty.openpty()
+        try:
+            result = subprocess.run([BIN, 'env', '-u', 'alice', '--shell', 'bash'],
+                env=self.env, stdout=slave, stderr=subprocess.PIPE, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b'refusing to print', result.stderr)
+            self.assertNotIn(KEY_A.encode(), result.stderr)
+        finally:
+            os.close(master)
+            os.close(slave)
+        profile = self.home / '.config/codex-rate-proxy/users/alice.key'
+        profile.write_bytes(b'CRPKEY\x00\x01broken')
+        result = self.cli('env', '-u', 'alice', '--shell', 'bash', check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
 
     def start_gateway(self, max_workers=32, max_inflight=128):
         with socket.socket() as s:
