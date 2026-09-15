@@ -73,6 +73,10 @@ struct RateState {
 type Ini = HashMap<String, HashMap<String, String>>;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if matches!(env::args().nth(1).as_deref(), Some("--version" | "-V")) {
+        println!("codex-rate-proxy {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if let Some(code) = launcher::dispatch()? { std::process::exit(code); }
     // Launcher/control commands need no worker pool; each proxy uses just two async workers.
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()?.block_on(serve())
@@ -462,6 +466,7 @@ fn parse_args() -> Result<PathBuf, Box<dyn Error>> {
             "-h" | "--help" => {
                 println!(
                     "codex-rate-proxy\n\nUsage: codex-rate-proxy [--config PATH]\n\
+                     codex-rate-proxy --version | -V\n\
                      codex-rate-proxy gateway [--config PATH]\n\
                      codex-rate-proxy env -u NAME --shell bash|csh|tcsh [--var NAME]\n\
                      codex-rate-proxy launch -u NAME -- [CODEX ARGS]\n\

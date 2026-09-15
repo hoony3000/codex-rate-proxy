@@ -10,6 +10,9 @@ root 권한이 필요하지 않습니다. 현재 Rust 버전은 **HTTP API와 HT
 
 관리자가 아래 설치와 공통 설정을 마친 뒤 사용하세요. 명령은 Bash와 csh/tcsh에서 동일합니다.
 
+설치된 버전은 `codex-rate-proxy --version` 또는 `codex-rate-proxy -V`로 확인합니다.
+설정 파일이나 API 키 없이 실행할 수 있습니다.
+
 ### 최초 등록 및 실행
 
 ```sh
