@@ -83,25 +83,26 @@ eval "$(codex-rate-proxy env -u hoony --shell bash)"
 
 ### VS Code Remote-SSH에서 등록된 키 사용
 
-원격 서버에 설치된 Codex 확장에 키를 전달하려면 [codex-ide.sh](codex-ide.sh)를 서버로 복사하세요.
+원격 서버에 설치된 Codex 확장에 키를 전달하려면 최신 [codex-ide.sh](codex-ide.sh)를 서버로 복사하세요.
 `codex-rate-proxy` v0.7.0 이상이 `~/.local/bin`에 설치되어 있어야 합니다.
-아래에서 `hoony`는 자신의 키 등록 이름으로 바꿉니다.
+
+공용 계정에서는 관리자가 래퍼 파일 하나를 설치하고, 등록 이름마다 심볼릭 링크를 만듭니다.
+아래의 `hoony`, `alice`는 각자의 키 등록 이름으로 바꿉니다.
 
 ```sh
 mkdir -p ~/.local/bin
-install -m 700 codex-ide.sh ~/.local/bin/codex-ide-hoony
+install -m 700 codex-ide.sh ~/.local/bin/codex-ide
+ln -sfnT codex-ide ~/.local/bin/codex-ide-hoony
+ln -sfnT codex-ide ~/.local/bin/codex-ide-alice
 ~/.local/bin/codex-ide-hoony --resolve-codex
 ```
 
-Windows에서 받아 옮기는 경우, 이 저장소는 `.gitattributes`로 `.sh` 파일의 줄바꿈을 LF로 고정합니다.
-기존 Windows 작업 폴더에서는 `git pull` 후에도 파일에 CRLF가 남을 수 있습니다.
-`git ls-files --eol -- codex-ide.sh`의 `w/lf`를 확인하고 복사하세요.
-`w/crlf`라면 새로 체크아웃한 파일을 사용하거나, CentOS에 이미 설치된 파일을 다음과 같이 고칩니다.
+위 링크 명령은 기존 설치본도 교체합니다. 이후에는 `~/.local/bin/codex-ide`만 업데이트하면 됩니다.
+각자의 VS Code에 이미 지정한 `codex-ide-이름` 경로는 그대로 사용합니다.
 
-```sh
-sed -i 's/\r$//' ~/.local/bin/codex-ide-hoony
-~/.local/bin/codex-ide-hoony --resolve-codex
-```
+Windows에서 `git pull`을 한 다음 원본을 복사하세요. `.gitattributes`가 `.sh` 파일을 LF로 체크아웃합니다.
+`git ls-files --eol -- codex-ide.sh`의 `w/lf`로 확인할 수 있습니다.
+편집기나 전송 도구가 파일을 CRLF로 바꿨다면 공용 파일 하나만 `sed -i 's/\r$//' ~/.local/bin/codex-ide`로 정리하세요.
 
 `--resolve-codex`는 자동으로 선택한 바이너리 경로만 표시합니다. 같은 설치 폴더에 여러 버전이 있으면 가장 높은 버전을 선택합니다.
 확장을 별도 경로에 설치했다면 래퍼를 시작하는 프로세스의 `CODEX_IDE_EXTENSIONS_DIR`에 확장 폴더를 지정할 수 있습니다.
