@@ -1,7 +1,7 @@
 # Codex Rate Proxy
 
 Codex CLI의 요청 간격과 HTTP 429 재시도를 제어하는 로컬 프록시입니다.
-요청과 응답 본문은 변경하지 않으며, SSE 스트리밍을 그대로 전달합니다.
+기본적으로 요청과 응답 본문을 그대로 전달하며, SSE 스트리밍을 지원합니다.
 
 x86_64 CentOS 7.4용 정적 바이너리를 제공합니다. 실행 서버에 Rust·Python 설치나
 root 권한이 필요하지 않습니다. 현재 Rust 버전은 **HTTP API와 HTTP 사내 프록시**를 지원합니다.
@@ -249,6 +249,22 @@ idle_timeout_seconds = 1800
 기존 설치를 전환할 때는 위 `[gateway]` 섹션을 직접 추가하세요(설치 스크립트는 기존 INI를 보존합니다).
 키가 달라도 같은 API 계정의 제한을 공유하는 경우에는 이 프록시들이 그 제한을 합산하지 않습니다.
 이 기능은 요청 간격과 429 대기를 제어하며, 정확한 TPM 제한 기능은 아닙니다.
+
+### developer 역할을 지원하지 않는 모델
+
+사내 모델 서버가 요청의 `developer` 역할을 거부할 때만 공통 `config.ini`에 추가하세요.
+
+```ini
+[compatibility]
+developer_role_to_system = true
+```
+
+기본값은 `false`입니다. 켜면 Responses와 Responses Compact의 `input[]` 메시지,
+Chat Completions의 `messages[]` 메시지에서 `role = "developer"`를 `"system"`으로 바꿉니다.
+본문 안의 메시지 순서, `instructions`, 도구 데이터 및 응답은 그대로 유지하며, API 형식 자체를 변환하지는 않습니다.
+압축된 요청 본문은 변경 없이 전달합니다.
+
+설정을 변경한 기존 worker는 아래 설정 반영 안내에 따라 다시 읽게 하세요.
 
 ### 공통 게이트웨이 시작
 
