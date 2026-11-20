@@ -1,5 +1,6 @@
 #!/bin/bash
-# Install as ~/.local/bin/codex-ide-<registered-name>. Requires Bash and coreutils.
+# Save this executable with LF line endings. Requires Bash and coreutils.
+# Use a codex-ide-<registered-name> symlink to select a key without copying this file.
 set +vx
 set -eu
 shopt -s nullglob
