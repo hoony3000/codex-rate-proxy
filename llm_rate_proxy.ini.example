@@ -17,6 +17,8 @@ max_request_body_bytes = 134217728
 [compatibility]
 # Enable only for upstreams that reject the developer message role.
 developer_role_to_system = false
+# Log outgoing role counts, never keys or message text.
+log_request_roles = false
 
 [rate_limit]
 min_interval_seconds = 10

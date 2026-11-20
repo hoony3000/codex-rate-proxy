@@ -266,6 +266,14 @@ Chat Completions의 `messages[]` 메시지에서 `role = "developer"`를 `"syste
 
 설정을 변경한 기존 worker는 아래 설정 반영 안내에 따라 다시 읽게 하세요.
 
+변환이 적용되는지 확인하려면 같은 `[compatibility]` 섹션에 `log_request_roles = true`를
+추가하고 worker에 `SIGHUP`을 보내세요. 다음 요청부터 `proxy.log`의
+`upstream request roles` 줄에 실제 전송 본문의 역할 개수와 변환 수가 표시됩니다.
+`rewritten=1; body=json; input=developer=0,system=1`이면 developer 메시지 하나를
+system으로 변환해 보냈다는 뜻입니다. `rewrite_field=unsupported`는 변환 대상이 아닌 경로,
+`body=encoded`는 압축 등으로 인코딩한 요청을 뜻합니다. 토큰, 메시지 본문, 도구 데이터는
+기록하지 않습니다. 진단 로그의 기본값은 `false`입니다.
+
 ### 공통 게이트웨이 시작
 
 관리자가 공유 Linux 계정에서 한 번 실행합니다. `enabled = true`만으로 게이트웨이가 자동 시작되지는 않습니다.
