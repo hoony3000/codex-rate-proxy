@@ -134,6 +134,10 @@ provider = corp
 개별 모드라면 `launch`가 키별 프록시를 시작하거나 재사용합니다.
 같은 Linux 계정을 공유하는 경우에는 공용 Remote Settings에 한 사람의 래퍼 경로를 넣지 마세요.
 
+### Claude Code 확장에서 등록된 키 사용
+
+[공용 CentOS 계정에서 Claude Code 키를 사용자별로 설정](CLAUDE-IDE.md)하는 방법을 참고하세요.
+
 ### URL 확인, 종료 및 등록 해제
 
 ```sh
