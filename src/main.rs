@@ -38,6 +38,7 @@ struct Settings {
     upstream_timeout: Duration,
     max_request_body_bytes: usize,
     developer_role_to_system: bool,
+    log_request_roles: bool,
     min_interval: Duration,
     max_retries: u32,
     backoff_base: Duration,
@@ -259,13 +260,13 @@ async fn proxy_request(State(state): State<AppState>, request: Request) -> Respo
     let target_url = build_target_url(&settings.upstream_base_url, &parts.uri);
     let headers = filtered_request_headers(&parts.headers);
     // Rewrite once, so all retry attempts send the same request.
-    let body = if settings.developer_role_to_system && parts.method == Method::POST
-        && parts.headers.get_all(header::CONTENT_ENCODING).iter()
-            .all(|value| value.as_bytes().eq_ignore_ascii_case(b"identity"))
-    {
-        rewrite_developer_roles(parts.uri.path(), &body).unwrap_or(body)
+    let encoded = parts.headers.get_all(header::CONTENT_ENCODING).iter()
+        .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"));
+    let role_field = role_rewrite_field(parts.uri.path());
+    let (body, rewritten) = if settings.developer_role_to_system && parts.method == Method::POST && !encoded {
+        role_field.and_then(|field| rewrite_developer_roles(field, &body)).unwrap_or((body, 0))
     } else {
-        body
+        (body, 0)
     };
 
     for attempt in 0..=settings.max_retries {
@@ -277,6 +278,9 @@ async fn proxy_request(State(state): State<AppState>, request: Request) -> Respo
             attempt + 1,
             settings.max_retries + 1
         ));
+        if attempt == 0 && settings.log_request_roles && parts.method == Method::POST {
+            log_upstream_request_roles(&body, encoded, role_field, settings.developer_role_to_system, rewritten);
+        }
 
         let result = client
             .request(parts.method.clone(), &target_url)
@@ -330,14 +334,17 @@ async fn proxy_request(State(state): State<AppState>, request: Request) -> Respo
     )
 }
 
-fn rewrite_developer_roles(path: &str, body: &[u8]) -> Option<Bytes> {
-    let field = match path.strip_prefix("/v1/").unwrap_or(path.trim_start_matches('/')) {
-        "responses" | "responses/compact" => "input",
-        "chat/completions" => "messages",
-        _ => return None,
-    };
+fn role_rewrite_field(path: &str) -> Option<&'static str> {
+    match path.strip_prefix("/v1/").unwrap_or(path.trim_start_matches('/')) {
+        "responses" | "responses/compact" => Some("input"),
+        "chat/completions" => Some("messages"),
+        _ => None,
+    }
+}
+
+fn rewrite_developer_roles(field: &str, body: &[u8]) -> Option<(Bytes, usize)> {
     let mut payload: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let mut changed = false;
+    let mut changed = 0;
     for item in payload.get_mut(field)?.as_array_mut()? {
         let Some(message) = item.as_object_mut() else { continue; };
         if field == "input" && message.get("type").is_some_and(|kind| kind.as_str() != Some("message")) {
@@ -346,14 +353,50 @@ fn rewrite_developer_roles(path: &str, body: &[u8]) -> Option<Bytes> {
         if let Some(role) = message.get_mut("role") {
             if role.as_str() == Some("developer") {
                 *role = serde_json::Value::String("system".into());
-                changed = true;
+                changed += 1;
             }
         }
     }
-    if !changed {
+    if changed == 0 {
         return None;
     }
-    serde_json::to_vec(&payload).ok().map(Bytes::from)
+    Some((Bytes::from(serde_json::to_vec(&payload).ok()?), changed))
+}
+
+fn log_upstream_request_roles(
+    body: &[u8], encoded: bool, role_field: Option<&str>, rewrite_enabled: bool, rewritten: usize,
+) {
+    // Emit only fixed labels and counts derived from the actual outgoing bytes.
+    let field = role_field.unwrap_or("unsupported");
+    let prefix = format!("upstream request roles: rewrite_enabled={rewrite_enabled}; rewrite_field={field}; rewritten={rewritten}");
+    if encoded {
+        log(&format!("{prefix}; body=encoded"));
+        return;
+    }
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(body) else {
+        log(&format!("{prefix}; body=non_json"));
+        return;
+    };
+    let summarize = |field| {
+        let Some(items) = payload.get(field).and_then(|value| value.as_array()) else {
+            return "not_an_array".into();
+        };
+        let mut developer = 0;
+        let mut system = 0;
+        for item in items {
+            match item.get("role").and_then(|role| role.as_str()) {
+                Some("developer") => developer += 1,
+                Some("system") => system += 1,
+                _ => (),
+            }
+        }
+        format!("developer={developer},system={system}")
+    };
+    let instructions = payload.get("instructions").is_some_and(|value| !value.is_null());
+    log(&format!(
+        "{prefix}; body=json; input={}; messages={}; instructions_present={instructions}",
+        summarize("input"), summarize("messages")
+    ));
 }
 
 fn stream_upstream_response(upstream: reqwest::Response, activity: Option<launcher::Activity>) -> Response<Body> {
@@ -552,6 +595,7 @@ fn load_settings(path: &Path) -> Result<Settings, Box<dyn Error>> {
             "134217728",
         )?,
         developer_role_to_system: parse_value(&ini, "compatibility", "developer_role_to_system", "false")?,
+        log_request_roles: parse_value(&ini, "compatibility", "log_request_roles", "false")?,
         min_interval: duration_value(&ini, "rate_limit", "min_interval_seconds", "10")?,
         max_retries: parse_value(&ini, "rate_limit", "max_retries", "5")?,
         backoff_base: duration_value(&ini, "rate_limit", "backoff_base_seconds", "5")?,

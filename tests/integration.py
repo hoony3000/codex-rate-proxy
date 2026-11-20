@@ -230,11 +230,12 @@ idle_timeout_seconds = {idle}
 
         self.assertEqual(send("/responses", raw), raw)
         record = self.records()[0]
+        log_path = record.parent / "proxy.log"
+        self.assertNotIn("upstream request roles:", log_path.read_text())
         with self.config.open("a") as f:
-            f.write("\n[compatibility]\ndeveloper_role_to_system = true\n")
+            f.write("\n[compatibility]\ndeveloper_role_to_system = true\nlog_request_roles = true\n")
         os.kill(json.loads(record.read_text())["pid"], signal.SIGHUP)
-        wait_until(lambda: "configuration reloaded:" in
-                   (record.parent / "proxy.log").read_text())
+        wait_until(lambda: "configuration reloaded:" in log_path.read_text())
 
         payload["input"][0]["role"] = payload["input"][1]["role"] = "system"
         for path in ("/responses", "/responses/compact?test=1"):
@@ -250,6 +251,14 @@ idle_timeout_seconds = {idle}
                 {"role": "assistant", "content": "ok"},
             ],
         })
+        diagnostics = "\n".join(line for line in log_path.read_text().splitlines()
+                                if "upstream request roles:" in line)
+        self.assertIn("rewrite_field=input; rewritten=2; body=json; input=developer=0,system=2", diagnostics)
+        self.assertIn("rewrite_field=unsupported; rewritten=0; body=json; input=developer=2,system=0", diagnostics)
+        self.assertIn("rewrite_field=messages; rewritten=1; body=json; input=not_an_array; messages=developer=0,system=1", diagnostics)
+        self.assertNotIn("developer text is unchanged", diagnostics)
+        self.assertNotIn("second instruction", diagnostics)
+        self.assertNotIn(KEY_A, diagnostics)
 
     def test_gateway_common_url_concurrency_and_key_routing(self):
         self.start_gateway()
