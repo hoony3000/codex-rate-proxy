@@ -93,6 +93,16 @@ install -m 700 codex-ide.sh ~/.local/bin/codex-ide-hoony
 ~/.local/bin/codex-ide-hoony --resolve-codex
 ```
 
+Windows에서 받아 옮기는 경우, 이 저장소는 `.gitattributes`로 `.sh` 파일의 줄바꿈을 LF로 고정합니다.
+기존 Windows 작업 폴더에서는 `git pull` 후에도 파일에 CRLF가 남을 수 있습니다.
+`git ls-files --eol -- codex-ide.sh`의 `w/lf`를 확인하고 복사하세요.
+`w/crlf`라면 새로 체크아웃한 파일을 사용하거나, CentOS에 이미 설치된 파일을 다음과 같이 고칩니다.
+
+```sh
+sed -i 's/\r$//' ~/.local/bin/codex-ide-hoony
+~/.local/bin/codex-ide-hoony --resolve-codex
+```
+
 `--resolve-codex`는 자동으로 선택한 바이너리 경로만 표시합니다. 같은 설치 폴더에 여러 버전이 있으면 가장 높은 버전을 선택합니다.
 확장을 별도 경로에 설치했다면 래퍼를 시작하는 프로세스의 `CODEX_IDE_EXTENSIONS_DIR`에 확장 폴더를 지정할 수 있습니다.
 
