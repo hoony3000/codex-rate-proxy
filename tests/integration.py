@@ -210,6 +210,47 @@ idle_timeout_seconds = {idle}
         wait_until(healthy)
         return process
 
+    def test_developer_role_compatibility_is_opt_in_and_scoped(self):
+        self.start_gateway()
+        payload = {
+            "instructions": "developer text is unchanged",
+            "input": [
+                {"type": "message", "role": "developer", "content": "developer"},
+                {"role": "developer", "content": "second instruction"},
+                {"role": "user", "content": "developer"},
+                {"type": "function_call_output", "call_id": "test",
+                 "output": '{"role":"developer"}'},
+            ],
+        }
+        raw = json.dumps(payload, indent=2).encode()
+
+        def send(path, body):
+            with self.request(self.gateway_url, path=path, data=body) as response:
+                return response.read()
+
+        self.assertEqual(send("/responses", raw), raw)
+        record = self.records()[0]
+        with self.config.open("a") as f:
+            f.write("\n[compatibility]\ndeveloper_role_to_system = true\n")
+        os.kill(json.loads(record.read_text())["pid"], signal.SIGHUP)
+        wait_until(lambda: "configuration reloaded:" in
+                   (record.parent / "proxy.log").read_text())
+
+        payload["input"][0]["role"] = payload["input"][1]["role"] = "system"
+        for path in ("/responses", "/responses/compact?test=1"):
+            with self.subTest(path=path):
+                self.assertEqual(json.loads(send(path, raw)), payload)
+        self.assertEqual(send("/other", raw), raw)
+        self.assertEqual(send("/responses", b'{ "input": "no role" }'), b'{ "input": "no role" }')
+
+        chat = b'{"messages":[{"role":"developer","content":"developer"},{"role":"assistant","content":"ok"}]}'
+        self.assertEqual(json.loads(send("/chat/completions", chat)), {
+            "messages": [
+                {"role": "system", "content": "developer"},
+                {"role": "assistant", "content": "ok"},
+            ],
+        })
+
     def test_gateway_common_url_concurrency_and_key_routing(self):
         self.start_gateway()
         def send(key):
