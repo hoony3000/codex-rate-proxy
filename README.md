@@ -116,9 +116,22 @@ Windows에서 `git pull`을 한 다음 원본을 복사하세요. `.gitattribute
 }
 ```
 
-래퍼는 파일명에서 등록 이름을 읽고 `OPENAI_API_KEY`를 Codex 프로세스에만 설정합니다.
-원격 `~/.codex/config.toml`의 provider는 `env_key = "OPENAI_API_KEY"`를 사용해야 합니다.
-공통 게이트웨이를 사용할 때는 provider의 `base_url`을 게이트웨이 URL(기본 `http://127.0.0.1:8765/v1`)로 설정하고 게이트웨이를 먼저 실행하세요.
+래퍼는 파일명에서 등록 이름을 읽고 `codex-rate-proxy launch -u 이름`으로 실행합니다.
+확장이 전달하는 `app-server`와 옵션은 그대로 넘기며, `launch`가 등록 키와 로컬 프록시 URL을 설정합니다.
+`~/.codex/config.toml`에 사용할 사내 provider를 미리 정의하세요. `base_url`을 로컬 프록시 URL로 따로 변경할 필요는 없습니다.
+
+확장 번들의 Codex를 사용하려면 원격 서버의 `~/.config/codex-rate-proxy/config.ini`에서 다음 값을 확인하세요.
+`provider`에는 현재 사용 중인 provider의 이름을 넣습니다.
+
+```ini
+[launcher]
+codex_binary = codex
+provider = corp
+```
+
+`codex_binary`에 별도 경로를 지정한 경우에는 그 바이너리가 사용됩니다.
+공통 게이트웨이 모드라면 `codex-rate-proxy gateway`를 먼저 실행하세요.
+개별 모드라면 `launch`가 키별 프록시를 시작하거나 재사용합니다.
 같은 Linux 계정을 공유하는 경우에는 공용 Remote Settings에 한 사람의 래퍼 경로를 넣지 마세요.
 
 ### URL 확인, 종료 및 등록 해제

@@ -54,11 +54,6 @@ launcher_name=${0##*/}
 profile=${launcher_name#codex-ide-}
 [[ "$profile" =~ ^[A-Za-z0-9_-]+$ ]] || die 'invalid registered name in launcher filename'
 
-unset OPENAI_API_KEY
-key_setup=$("$HOME/.local/bin/codex-rate-proxy" env -u "$profile" --shell bash) ||
-    die 'could not load the registered API key'
-eval "$key_setup"
-unset key_setup
-[[ -n "${OPENAI_API_KEY:-}" ]] || die 'registered API key was empty'
-
-exec "$codex_bin" "$@"
+# Resolve "codex" from the extension bundle when [launcher] codex_binary = codex.
+export PATH="${codex_bin%/*}:${PATH:-/usr/bin:/bin}"
+exec "$HOME/.local/bin/codex-rate-proxy" launch -u "$profile" -- "$@"
