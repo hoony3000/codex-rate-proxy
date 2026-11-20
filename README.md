@@ -81,6 +81,35 @@ eval "$(codex-rate-proxy env -u hoony --shell bash)"
 직접 터미널에 출력하는 것은 거부합니다. 셸의 명령 추적(`set -x`, csh의 `echo`/`verbose`)을
 활성화한 상태에서는 사용하지 마세요. csh/tcsh는 서버의 `/usr/bin/printf`를 사용합니다.
 
+### VS Code Remote-SSH에서 등록된 키 사용
+
+원격 서버에 설치된 Codex 확장에 키를 전달하려면 [codex-ide.sh](codex-ide.sh)를 서버로 복사하세요.
+`codex-rate-proxy` v0.7.0 이상이 `~/.local/bin`에 설치되어 있어야 합니다.
+아래에서 `hoony`는 자신의 키 등록 이름으로 바꿉니다.
+
+```sh
+mkdir -p ~/.local/bin
+install -m 700 codex-ide.sh ~/.local/bin/codex-ide-hoony
+~/.local/bin/codex-ide-hoony --resolve-codex
+```
+
+`--resolve-codex`는 자동으로 선택한 바이너리 경로만 표시합니다. 같은 설치 폴더에 여러 버전이 있으면 가장 높은 버전을 선택합니다.
+확장을 별도 경로에 설치했다면 래퍼를 시작하는 프로세스의 `CODEX_IDE_EXTENSIONS_DIR`에 확장 폴더를 지정할 수 있습니다.
+
+각자 **로컬 VS Code User Settings (JSON)**에 원격 서버의 래퍼 절대 경로를 넣고 `Developer: Reload Window`를 실행하세요.
+`/home/shared`는 원격 계정의 실제 홈 경로로 바꿉니다. `chatgpt.cliExecutable`은 Codex 확장의 개발용 설정입니다.
+
+```json
+{
+  "chatgpt.cliExecutable": "/home/shared/.local/bin/codex-ide-hoony"
+}
+```
+
+래퍼는 파일명에서 등록 이름을 읽고 `OPENAI_API_KEY`를 Codex 프로세스에만 설정합니다.
+원격 `~/.codex/config.toml`의 provider는 `env_key = "OPENAI_API_KEY"`를 사용해야 합니다.
+공통 게이트웨이를 사용할 때는 provider의 `base_url`을 게이트웨이 URL(기본 `http://127.0.0.1:8765/v1`)로 설정하고 게이트웨이를 먼저 실행하세요.
+같은 Linux 계정을 공유하는 경우에는 공용 Remote Settings에 한 사람의 래퍼 경로를 넣지 마세요.
+
 ### URL 확인, 종료 및 등록 해제
 
 ```sh
